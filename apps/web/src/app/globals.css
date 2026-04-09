@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ivory: #eeebd9;
+  --smoke: #282427;
+  --ring: rgba(40, 36, 39, 0.15);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-ivory-100 text-smoke-400 antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  @apply bg-smoke-400 text-ivory-100;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}

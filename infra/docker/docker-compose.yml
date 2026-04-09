@@ -1,0 +1,97 @@
+# TIPTAP — Postgres, Redis, API, Web
+# From repo root: docker compose -f infra/docker/docker-compose.yml up --build
+# Web: http://localhost:3001  ·  API: http://localhost:3000  ·  Swagger: http://localhost:3000/docs
+#
+# Seed (baada ya stack kuwa juu, mara moja): 
+#   docker compose -f infra/docker/docker-compose.yml --profile seed run --rm seed
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tiptap
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    image: tiptap-api:local
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/tiptap
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      LOG_LEVEL: info
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev_access_secret_change_in_prod_1}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_refresh_secret_change_in_prod_1}
+      # Required to encrypt ClickPesa (and other) keys at rest — without it, saving payment config returns an error
+      PAYMENTS_CREDENTIALS_SECRET: ${PAYMENTS_CREDENTIALS_SECRET:-dev_payments_credentials_secret_change_in_prod_min_32_chars}
+      SWAGGER_ENABLED: 'true'
+      SWAGGER_PATH: docs
+      # Browser calls API on host machine (not the internal Docker hostname)
+      CORS_ORIGINS: http://localhost:3001,http://127.0.0.1:3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Seed: hutumia picha moja na api (inahitaji `api` iwe imejengwa: up --build)
+  seed:
+    image: tiptap-api:local
+    # Badala ENTRYPOINT ya picha (/docker-entrypoint.sh inaanza API); lazima run seed pekee
+    entrypoint: ['/bin/sh', '-c', 'cd /workspace && pnpm --filter @tiptap/api exec prisma db seed']
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/tiptap
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@tiptap.local}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe!123}
+      SEED_RESET_ADMIN_PASSWORD: ${SEED_RESET_ADMIN_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: [seed]
+
+  web:
+    image: tiptap-web:local
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:3000/api/v1
+    ports:
+      - '3001:3001'
+    environment:
+      # SSR must reach the API inside the compose network (localhost:3000 is wrong inside the web container)
+      API_INTERNAL_BASE_URL: http://api:3000/api/v1
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:
