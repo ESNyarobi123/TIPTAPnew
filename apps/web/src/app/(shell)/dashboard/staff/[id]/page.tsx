@@ -27,10 +27,9 @@ import {
   getStaffInternal,
   listStaffCompensation,
   listAssignments,
+  type PayrollLineKind,
   type StaffCompensationStatus,
-  type StaffCompensationType,
   updateAssignment,
-  updateStaffCompensation,
   updateStaff,
   updateStaffInternal,
 } from '@/lib/api/staff';
@@ -53,12 +52,17 @@ type CompensationRow = {
   branchId?: string | null;
   type?: string;
   status?: string;
+  lineKind?: PayrollLineKind | null;
+  label?: string | null;
+  sourceReference?: string | null;
   amountCents?: number;
   currency?: string;
   periodLabel?: string | null;
   effectiveDate?: string;
   paidAt?: string | null;
   notes?: string | null;
+  payrollSlipId?: string | null;
+  lockedAt?: string | null;
 };
 
 function asAssign(x: unknown): AssignmentRow {
@@ -80,12 +84,17 @@ function asCompensation(x: unknown): CompensationRow {
     branchId: typeof o.branchId === 'string' ? o.branchId : (o.branchId === null ? null : undefined),
     type: typeof o.type === 'string' ? o.type : undefined,
     status: typeof o.status === 'string' ? o.status : undefined,
+    lineKind: typeof o.lineKind === 'string' ? (o.lineKind as PayrollLineKind) : (o.lineKind === null ? null : undefined),
+    label: typeof o.label === 'string' ? o.label : (o.label === null ? null : undefined),
+    sourceReference: typeof o.sourceReference === 'string' ? o.sourceReference : (o.sourceReference === null ? null : undefined),
     amountCents: typeof o.amountCents === 'number' ? o.amountCents : undefined,
     currency: typeof o.currency === 'string' ? o.currency : undefined,
     periodLabel: typeof o.periodLabel === 'string' ? o.periodLabel : (o.periodLabel === null ? null : undefined),
     effectiveDate: typeof o.effectiveDate === 'string' ? o.effectiveDate : undefined,
     paidAt: typeof o.paidAt === 'string' ? o.paidAt : (o.paidAt === null ? null : undefined),
     notes: typeof o.notes === 'string' ? o.notes : (o.notes === null ? null : undefined),
+    payrollSlipId: typeof o.payrollSlipId === 'string' ? o.payrollSlipId : (o.payrollSlipId === null ? null : undefined),
+    lockedAt: typeof o.lockedAt === 'string' ? o.lockedAt : (o.lockedAt === null ? null : undefined),
   };
 }
 
@@ -113,13 +122,15 @@ export default function StaffDetailPage() {
   const [providerInternalNotes, setProviderInternalNotes] = useState('');
   const [providerId, setProviderId] = useState<string | null>(null);
   const [tab, setTab] = useState<'public' | 'internal' | 'assignments' | 'pay'>('public');
-  const [payType, setPayType] = useState<StaffCompensationType>('SALARY');
+  const [payLineKind, setPayLineKind] = useState<PayrollLineKind>('BASIC_SALARY');
   const [payStatus, setPayStatus] = useState<StaffCompensationStatus>('SCHEDULED');
   const [payAmount, setPayAmount] = useState('0');
   const [payCurrency, setPayCurrency] = useState('TZS');
   const [payBranchId, setPayBranchId] = useState('');
   const [payPeriodLabel, setPayPeriodLabel] = useState('');
   const [payEffectiveDate, setPayEffectiveDate] = useState('');
+  const [payLabel, setPayLabel] = useState('');
+  const [paySourceReference, setPaySourceReference] = useState('');
   const [payNotes, setPayNotes] = useState('');
 
   const canEdit = useMemo(() => Boolean(tenantId && staffId), [tenantId, staffId]);
@@ -320,8 +331,10 @@ export default function StaffDetailPage() {
     try {
       await createStaffCompensation(token, staffId, {
         branchId: payBranchId || null,
-        type: payType,
         status: payStatus,
+        lineKind: payLineKind,
+        label: payLabel || null,
+        sourceReference: paySourceReference || null,
         amountCents: Math.max(0, Math.floor(Number(payAmount) || 0)),
         currency: payCurrency || 'TZS',
         periodLabel: payPeriodLabel || null,
@@ -332,28 +345,12 @@ export default function StaffDetailPage() {
       setPayAmount('0');
       setPayPeriodLabel('');
       setPayEffectiveDate('');
+      setPayLabel('');
+      setPaySourceReference('');
       setPayNotes('');
       await loadAll();
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : 'Could not save pay row');
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function markPaid(row: CompensationRow) {
-    const token = getStoredToken();
-    if (!token || !staffId) return;
-    setPending(true);
-    try {
-      await updateStaffCompensation(token, staffId, row.id, {
-        status: 'PAID',
-        paidAt: new Date().toISOString(),
-      });
-      toast.success('Marked as paid');
-      await loadAll();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : 'Could not update pay row');
     } finally {
       setPending(false);
     }
@@ -391,6 +388,9 @@ export default function StaffDetailPage() {
             </Button>
             <Button asChild variant="outline" size="sm">
               <Link href={qrHref}>Generate QR</Link>
+            </Button>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/dashboard/payroll">Payroll desk</Link>
             </Button>
             <Button
               type="button"
@@ -716,16 +716,21 @@ export default function StaffDetailPage() {
               <CardTitle className="text-base">Pay</CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
-              <div className="grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-                <div className="space-y-4 rounded-2xl border border-smoke-400/10 bg-ivory-50/70 p-4">
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+                  <div className="space-y-4 rounded-2xl border border-smoke-400/10 bg-ivory-50/70 p-4">
                   <div className="grid gap-3 md:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor="sd-pay-type">Type</Label>
-                      <Select id="sd-pay-type" value={payType} onChange={(e) => setPayType(e.target.value as StaffCompensationType)}>
-                        <option value="SALARY">Salary</option>
-                        <option value="BONUS">Bonus</option>
+                      <Label htmlFor="sd-pay-kind">Line kind</Label>
+                      <Select id="sd-pay-kind" value={payLineKind} onChange={(e) => setPayLineKind(e.target.value as PayrollLineKind)}>
+                        <option value="BASIC_SALARY">Basic salary</option>
+                        <option value="ALLOWANCE">Allowance</option>
+                        <option value="OVERTIME">Overtime</option>
                         <option value="COMMISSION">Commission</option>
-                        <option value="ADVANCE">Advance</option>
+                        <option value="TIP_SHARE">Tip share</option>
+                        <option value="SERVICE_CHARGE_SHARE">Service charge share</option>
+                        <option value="BONUS">Bonus</option>
+                        <option value="ADJUSTMENT">Adjustment</option>
+                        <option value="ADVANCE_RECOVERY">Advance recovery</option>
                         <option value="DEDUCTION">Deduction</option>
                       </Select>
                     </div>
@@ -734,9 +739,17 @@ export default function StaffDetailPage() {
                       <Select id="sd-pay-status" value={payStatus} onChange={(e) => setPayStatus(e.target.value as StaffCompensationStatus)}>
                         <option value="SCHEDULED">Scheduled</option>
                         <option value="APPROVED">Approved</option>
-                        <option value="PAID">Paid</option>
-                        <option value="VOID">Void</option>
                       </Select>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="sd-pay-label">Label</Label>
+                      <Input id="sd-pay-label" value={payLabel} onChange={(e) => setPayLabel(e.target.value)} placeholder="Base salary, tip share, allowance…" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="sd-pay-source">Source ref</Label>
+                      <Input id="sd-pay-source" value={paySourceReference} onChange={(e) => setPaySourceReference(e.target.value)} placeholder="Order, booking, policy ref…" />
                     </div>
                   </div>
                   <div className="grid gap-3 md:grid-cols-2">
@@ -785,36 +798,25 @@ export default function StaffDetailPage() {
                   <Table>
                     <thead>
                       <tr>
-                        <Th>Period</Th>
+                        <Th>Line</Th>
                         <Th>Status</Th>
                         <Th>Amount</Th>
-                        <Th>Branch</Th>
+                        <Th>Slip</Th>
                         <Th>Date</Th>
-                        <Th />
                       </tr>
                     </thead>
                     <tbody>
                       {compensationRows.map((row) => (
                         <tr key={row.id}>
-                          <Td className="text-sm text-smoke-300">{row.periodLabel || row.type?.replaceAll('_', ' ') || 'Pay'}</Td>
+                          <Td className="text-sm text-smoke-300">
+                            <div className="font-medium text-smoke-400">{row.label || row.lineKind?.replaceAll('_', ' ') || row.type?.replaceAll('_', ' ') || 'Pay line'}</div>
+                            <div className="text-xs text-smoke-200">{row.periodLabel || 'No period'}{row.sourceReference ? ` · ${row.sourceReference}` : ''}</div>
+                          </Td>
                           <Td>{row.status ? <StatusChip status={row.status} /> : '—'}</Td>
                           <Td className="text-sm font-medium text-smoke-400">{formatMinorUnits(row.amountCents ?? 0)}</Td>
-                          <Td className="text-xs text-smoke-200">
-                            {row.branchId ? branchNameById.get(row.branchId) ?? row.branchId.slice(0, 8) : 'Tenant'}
-                          </Td>
+                          <Td className="text-xs text-smoke-200">{row.payrollSlipId ? 'On payslip' : row.lockedAt ? 'Locked' : 'Open'}</Td>
                           <Td className="text-xs text-smoke-200">
                             {row.effectiveDate ? new Date(row.effectiveDate).toLocaleDateString() : '—'}
-                          </Td>
-                          <Td className="text-right">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled={pending || row.status === 'PAID' || row.status === 'VOID'}
-                              onClick={() => void markPaid(row)}
-                            >
-                              Mark paid
-                            </Button>
                           </Td>
                         </tr>
                       ))}

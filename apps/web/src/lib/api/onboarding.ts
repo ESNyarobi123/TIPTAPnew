@@ -16,3 +16,10 @@ export function upsertTenantCategory(token: string, tenantId: string, body: Reco
   });
 }
 
+export function createSelfServeBusinessWorkspace(token: string, body: Record<string, unknown>) {
+  return apiFetch<unknown>('/tenants/self-serve', {
+    method: 'POST',
+    token,
+    json: body,
+  });
+}

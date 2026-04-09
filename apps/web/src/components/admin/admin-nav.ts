@@ -12,7 +12,7 @@ export const adminNav: NavItem[] = [
   { section: 'Platform core', href: '/admin/service-staff', label: 'Service staff', icon: 'fluent-color:contact-card-48' },
   { section: 'Platform core', href: '/admin/dining-orders', label: 'Dining orders', icon: 'fluent-color:food-48' },
   { section: 'Platform core', href: '/admin/beauty-bookings', label: 'Beauty bookings', icon: 'fluent-color:calendar-people-20' },
-  { section: 'Platform core', href: '/admin/orders', label: 'Payment ledger', icon: 'fluent-color:receipt-24' },
+  { section: 'Platform core', href: '/admin/orders', label: 'Order center', icon: 'fluent-color:receipt-bag-24' },
   { section: 'Platform core', href: '/admin/users', label: 'Users & roles', icon: 'fluent-color:people-team-48' },
   { section: 'Platform core', href: '/admin/approvals', label: 'Approvals', icon: 'fluent-color:approvals-app-24' },
   { section: 'Platform core', href: '/admin/impersonation', label: 'Impersonation', icon: 'fluent-color:scan-person-24' },

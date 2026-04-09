@@ -1,37 +1,29 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { BaileysAdapter } from './adapters/baileys.adapter';
-
-type StoredSession = {
-  token: string;
-  lastUsedAt: number;
-};
-
-type PersistedSessionFile = {
-  version: 1;
-  sessions: Record<string, StoredSession>;
-};
+import { WhatsappSessionStoreService } from './whatsapp-session-store.service';
 
 @Injectable()
 export class WhatsappService implements OnModuleInit {
   private readonly log = new Logger(WhatsappService.name);
   private readonly adapter = new BaileysAdapter();
-  private readonly sessions = new Map<string, StoredSession>();
-  private persistChain: Promise<void> = Promise.resolve();
+  private enabled = false;
+  private bootState: 'disabled' | 'booting' | 'ready' | 'error' = 'disabled';
+  private lastError: string | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly sessions: WhatsappSessionStoreService,
+  ) {}
 
   async onModuleInit() {
-    const enabled = this.config.get<string>('WHATSAPP_ENABLED', 'false') === 'true';
-    if (!enabled) {
+    this.enabled = this.config.get<string>('WHATSAPP_ENABLED', 'false') === 'true';
+    if (!this.enabled) {
+      this.bootState = 'disabled';
       this.log.log('WhatsApp channel disabled (set WHATSAPP_ENABLED=true to enable)');
       return;
     }
-
-    await this.loadPersistedSessions();
-
+    this.bootState = 'booting';
     const authDir = this.config.get<string>('WHATSAPP_AUTH_DIR', '.wa-auth');
     this.log.log(`Connecting WhatsApp (authDir=${authDir})`);
 
@@ -40,8 +32,14 @@ export class WhatsappService implements OnModuleInit {
         authDir,
         onInbound: (m) => void this.onInbound(m.from, m.text),
       })
-      .then(() => this.log.log('WhatsApp adapter connected (scan QR in terminal if prompted)'))
+      .then(() => {
+        this.bootState = 'ready';
+        this.lastError = null;
+        this.log.log('WhatsApp adapter connected (scan QR in terminal if prompted)');
+      })
       .catch((e) => {
+        this.bootState = 'error';
+        this.lastError = e instanceof Error ? e.message : String(e);
         this.log.error(`WhatsApp adapter failed: ${e instanceof Error ? e.message : String(e)}`);
       });
   }
@@ -56,15 +54,6 @@ export class WhatsappService implements OnModuleInit {
     return lang === 'en' || lang === 'sw' ? lang : 'sw';
   }
 
-  private sessionTtlMs(): number {
-    return Number(this.config.get<string>('WHATSAPP_SESSION_TTL_MS', String(24 * 60 * 60 * 1000))) || 0;
-  }
-
-  private sessionStoreFile(): string {
-    const raw = this.config.get<string>('WHATSAPP_SESSION_STORE_FILE', '.whatsapp-sessions.json');
-    return resolve(process.cwd(), raw);
-  }
-
   private entryInstructions(): string {
     return [
       'Karibu TIPTAP.',
@@ -77,74 +66,6 @@ export class WhatsappService implements OnModuleInit {
     ].join('\n');
   }
 
-  private async loadPersistedSessions() {
-    try {
-      const raw = await readFile(this.sessionStoreFile(), 'utf8');
-      const parsed = JSON.parse(raw) as Partial<PersistedSessionFile>;
-      const sessions = parsed.sessions ?? {};
-      for (const [from, value] of Object.entries(sessions)) {
-        if (!from || typeof value?.token !== 'string' || typeof value?.lastUsedAt !== 'number') {
-          continue;
-        }
-        this.sessions.set(from, { token: value.token, lastUsedAt: value.lastUsedAt });
-      }
-      await this.cleanupSessions();
-      if (this.sessions.size > 0) {
-        this.log.log(`Restored ${this.sessions.size} WhatsApp session mapping(s) from disk`);
-      }
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException | undefined)?.code;
-      if (code !== 'ENOENT') {
-        this.log.warn(`Could not load persisted WhatsApp sessions: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-  }
-
-  private async persistSessions() {
-    const file = this.sessionStoreFile();
-    const payload: PersistedSessionFile = {
-      version: 1,
-      sessions: Object.fromEntries(this.sessions.entries()),
-    };
-    this.persistChain = this.persistChain
-      .catch(() => undefined)
-      .then(async () => {
-        await mkdir(dirname(file), { recursive: true });
-        await writeFile(file, JSON.stringify(payload, null, 2), 'utf8');
-      })
-      .catch((e) => {
-        this.log.warn(`Could not persist WhatsApp sessions: ${e instanceof Error ? e.message : String(e)}`);
-      });
-    await this.persistChain;
-  }
-
-  private async rememberSession(from: string, session: StoredSession) {
-    this.sessions.set(from, session);
-    await this.persistSessions();
-  }
-
-  private async forgetSession(from: string) {
-    if (!this.sessions.delete(from)) {
-      return;
-    }
-    await this.persistSessions();
-  }
-
-  private async cleanupSessions() {
-    const ttlMs = this.sessionTtlMs();
-    if (!ttlMs) return;
-    const now = Date.now();
-    let changed = false;
-    for (const [from, session] of this.sessions.entries()) {
-      if (now - session.lastUsedAt > ttlMs) {
-        this.sessions.delete(from);
-        changed = true;
-      }
-    }
-    if (changed) {
-      await this.persistSessions();
-    }
-  }
 
   private parseQrToken(text: string): string | null {
     const t = text.trim();
@@ -208,39 +129,50 @@ export class WhatsappService implements OnModuleInit {
   }
 
   private async onInbound(from: string, text: string) {
-    await this.cleanupSessions();
-
     const qrToken = this.parseQrToken(text);
-    const existing = this.sessions.get(from);
     try {
-      if (!existing) {
-        if (!qrToken) {
-          await this.adapter.sendText(from, this.entryInstructions());
+      await this.sessions.withSenderLock(from, async () => {
+        const existing = await this.sessions.getSession(from);
+        if (!existing) {
+          if (!qrToken) {
+            await this.adapter.sendText(from, this.entryInstructions());
+            return;
+          }
+
+          const started = await this.startSession(from, qrToken);
+          await this.sessions.setSession(from, {
+            token: started.sessionToken,
+            lastUsedAt: Date.now(),
+          });
+          await this.adapter.sendText(from, started.firstReply);
           return;
         }
 
-        const started = await this.startSession(from, qrToken);
-        await this.rememberSession(from, { token: started.sessionToken, lastUsedAt: Date.now() });
-        await this.adapter.sendText(from, started.firstReply);
-        return;
-      }
+        const reply = qrToken
+          ? await this.sendMessage(existing.token, 'hi', qrToken)
+          : await this.sendMessage(existing.token, text);
 
-      const reply = qrToken
-        ? await this.sendMessage(existing.token, 'hi', qrToken)
-        : await this.sendMessage(existing.token, text);
-
-      await this.rememberSession(from, { token: existing.token, lastUsedAt: Date.now() });
-      await this.adapter.sendText(from, reply);
+        await this.sessions.setSession(from, { token: existing.token, lastUsedAt: Date.now() });
+        await this.adapter.sendText(from, reply);
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`Inbound handler error for ${from}: ${msg}`);
 
+      if (msg.toLowerCase().includes('sender lock timeout')) {
+        await this.adapter.sendText(from, 'Subiri sekunde chache, tunaendelea kusawazisha ujumbe wako.');
+        return;
+      }
+
       if (this.isExpiredOrUnauthorized(msg)) {
-        await this.forgetSession(from);
+        await this.sessions.deleteSession(from);
         if (qrToken) {
           try {
             const restarted = await this.startSession(from, qrToken);
-            await this.rememberSession(from, { token: restarted.sessionToken, lastUsedAt: Date.now() });
+            await this.sessions.setSession(from, {
+              token: restarted.sessionToken,
+              lastUsedAt: Date.now(),
+            });
             await this.adapter.sendText(from, restarted.firstReply);
             return;
           } catch (restartError) {
@@ -259,8 +191,26 @@ export class WhatsappService implements OnModuleInit {
   }
 
   async sendAdminText(to: string, text: string) {
+    if (!this.enabled) {
+      throw new Error('WhatsApp channel disabled (set WHATSAPP_ENABLED=true)');
+    }
     const trimmed = text.trim();
     if (!trimmed) return;
     await this.adapter.sendText(to, trimmed);
+  }
+
+  getAdminStatus() {
+    const adapter = this.adapter.getStatus();
+    return {
+      ok: true,
+      service: 'bot-gateway',
+      channel: 'whatsapp',
+      whatsappEnabled: this.enabled,
+      bootState: this.bootState,
+      connected: adapter.connected,
+      connectionState: adapter.connectionState,
+      canSend: this.enabled && adapter.connected,
+      lastError: this.lastError,
+    };
   }
 }

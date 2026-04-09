@@ -162,3 +162,30 @@ export function patchAssistanceRequest(token: string, id: string, body: { status
   return apiFetch<unknown>(`/beauty-grooming/assistance-requests/${encodeURIComponent(id)}`, { method: 'PATCH', token, json: body });
 }
 
+export function listBeautyBookings(
+  token: string,
+  params: { tenantId: string; branchId?: string | null; status?: string | null; staffId?: string | null; date?: string | null },
+) {
+  return apiFetch<unknown[]>(
+    `/beauty-grooming/bookings${toQueryString({
+      tenantId: params.tenantId,
+      branchId: params.branchId ?? undefined,
+      status: params.status ?? undefined,
+      staffId: params.staffId ?? undefined,
+      date: params.date ?? undefined,
+    })}`,
+    { token },
+  );
+}
+
+export function patchBeautyBooking(
+  token: string,
+  id: string,
+  body: { status?: string; staffId?: string; scheduledAt?: string; notes?: string },
+) {
+  return apiFetch<unknown>(`/beauty-grooming/bookings/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    token,
+    json: body,
+  });
+}

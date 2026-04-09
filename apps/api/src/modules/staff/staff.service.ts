@@ -7,7 +7,17 @@ import {
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import type { Staff } from '@prisma/client';
-import { Prisma, RoleCode, type StaffAssignmentMode } from '@prisma/client';
+import {
+  PayrollDisbursementMethod,
+  PayrollLineKind,
+  PayrollRunStatus,
+  PayrollSlipStatus,
+  Prisma,
+  RoleCode,
+  StaffCompensationStatus,
+  StaffCompensationType,
+  type StaffAssignmentMode,
+} from '@prisma/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { AuditService } from '../audit-logs/audit.service';
 import type { AuthUser } from '../auth/types/request-user.type';
@@ -15,12 +25,15 @@ import { userIsSuperAdmin } from '../auth/types/request-user.type';
 import { ProviderRegistryService } from '../provider-registry/provider-registry.service';
 import { TenantAccessService } from '../tenants/tenant-access.service';
 import type { CreateStaffAssignmentDto } from './dto/create-staff-assignment.dto';
+import type { CreatePayrollRunDto } from './dto/create-payroll-run.dto';
 import type { CreateStaffCompensationDto } from './dto/create-staff-compensation.dto';
 import type { CreateStaffDto } from './dto/create-staff.dto';
 import type { CreateStaffJoinInviteDto } from './dto/create-staff-join-invite.dto';
 import type { LinkProviderProfileDto } from './dto/link-provider-profile.dto';
+import type { RecordPayrollDisbursementDto } from './dto/record-payroll-disbursement.dto';
 import type { RedeemStaffJoinInviteDto } from './dto/redeem-staff-join-invite.dto';
 import type { UpdateStaffAssignmentDto } from './dto/update-staff-assignment.dto';
+import type { UpdatePayrollRunStatusDto } from './dto/update-payroll-run-status.dto';
 import type { UpdateStaffCompensationDto } from './dto/update-staff-compensation.dto';
 import type { UpdateStaffDto } from './dto/update-staff.dto';
 
@@ -28,6 +41,48 @@ export type StaffRequestMeta = {
   correlationId?: string;
   ipAddress?: string;
   userAgent?: string;
+};
+
+type CompensationLike = {
+  id: string;
+  tenantId: string;
+  branchId: string | null;
+  staffId: string;
+  type: string;
+  status: string;
+  lineKind: string | null;
+  label: string | null;
+  sourceReference: string | null;
+  amountCents: number;
+  currency: string;
+  periodLabel: string | null;
+  periodStart: Date | null;
+  periodEnd: Date | null;
+  effectiveDate: Date;
+  paidAt: Date | null;
+  notes: string | null;
+  payrollRunId: string | null;
+  payrollSlipId: string | null;
+  lockedAt: Date | null;
+  createdByUserId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type PayrollTotals = {
+  grossCents: number;
+  deductionCents: number;
+  netCents: number;
+  baseSalaryCents: number;
+  allowanceCents: number;
+  commissionCents: number;
+  bonusCents: number;
+  tipShareCents: number;
+  overtimeCents: number;
+  serviceChargeCents: number;
+  adjustmentCents: number;
+  advanceRecoveryCents: number;
+  otherDeductionCents: number;
 };
 
 @Injectable()
@@ -39,7 +94,7 @@ export class StaffService {
     private readonly providerRegistry: ProviderRegistryService,
   ) {}
 
-  private mapStaff(s: Staff) {
+  private mapStaff(s: Staff & { providerProfile?: { registryCode: string | null } | null }) {
     return {
       id: s.id,
       tenantId: s.tenantId,
@@ -53,6 +108,7 @@ export class StaffService {
       status: s.status,
       hireDate: s.hireDate,
       publicHandle: s.publicHandle,
+      providerRegistryCode: s.providerProfile?.registryCode ?? null,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
     };
@@ -65,25 +121,7 @@ export class StaffService {
     };
   }
 
-  private mapCompensation(row: {
-    id: string;
-    tenantId: string;
-    branchId: string | null;
-    staffId: string;
-    type: string;
-    status: string;
-    amountCents: number;
-    currency: string;
-    periodLabel: string | null;
-    periodStart: Date | null;
-    periodEnd: Date | null;
-    effectiveDate: Date;
-    paidAt: Date | null;
-    notes: string | null;
-    createdByUserId: string | null;
-    createdAt: Date;
-    updatedAt: Date;
-  }) {
+  private mapCompensation(row: CompensationLike) {
     return {
       id: row.id,
       tenantId: row.tenantId,
@@ -91,6 +129,9 @@ export class StaffService {
       staffId: row.staffId,
       type: row.type,
       status: row.status,
+      lineKind: row.lineKind,
+      label: row.label,
+      sourceReference: row.sourceReference,
       amountCents: row.amountCents,
       currency: row.currency,
       periodLabel: row.periodLabel,
@@ -99,9 +140,232 @@ export class StaffService {
       effectiveDate: row.effectiveDate,
       paidAt: row.paidAt,
       notes: row.notes,
+      payrollRunId: row.payrollRunId,
+      payrollSlipId: row.payrollSlipId,
+      lockedAt: row.lockedAt,
+      locked: Boolean(row.lockedAt),
       createdByUserId: row.createdByUserId,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
+    };
+  }
+
+  private mapPayrollRun(row: {
+    id: string;
+    tenantId: string;
+    branchId: string | null;
+    status: string;
+    currency: string;
+    periodLabel: string;
+    periodStart: Date;
+    periodEnd: Date;
+    notes: string | null;
+    createdByUserId: string | null;
+    approvedByUserId: string | null;
+    approvedAt: Date | null;
+    paidAt: Date | null;
+    reconciledAt: Date | null;
+    voidedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+    slips?: Array<{
+      id: string;
+      staffId: string;
+      status: string;
+      grossCents: number;
+      deductionCents: number;
+      netCents: number;
+    }>;
+  }) {
+    const slips = row.slips ?? [];
+    return {
+      id: row.id,
+      tenantId: row.tenantId,
+      branchId: row.branchId,
+      status: row.status,
+      currency: row.currency,
+      periodLabel: row.periodLabel,
+      periodStart: row.periodStart,
+      periodEnd: row.periodEnd,
+      notes: row.notes,
+      createdByUserId: row.createdByUserId,
+      approvedByUserId: row.approvedByUserId,
+      approvedAt: row.approvedAt,
+      paidAt: row.paidAt,
+      reconciledAt: row.reconciledAt,
+      voidedAt: row.voidedAt,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      summary: {
+        slipCount: slips.length,
+        staffCount: new Set(slips.map((slip) => slip.staffId)).size,
+        grossCents: slips.reduce((sum, slip) => sum + slip.grossCents, 0),
+        deductionCents: slips.reduce((sum, slip) => sum + slip.deductionCents, 0),
+        netCents: slips.reduce((sum, slip) => sum + slip.netCents, 0),
+        paidCount: slips.filter((slip) => slip.status === 'PAID' || slip.status === 'RECONCILED').length,
+      },
+    };
+  }
+
+  private mapPayrollSlip(row: {
+    id: string;
+    tenantId: string;
+    branchId: string | null;
+    staffId: string;
+    payrollRunId: string | null;
+    slipNumber: string;
+    status: string;
+    currency: string;
+    periodLabel: string;
+    periodStart: Date;
+    periodEnd: Date;
+    effectiveDate: Date;
+    grossCents: number;
+    deductionCents: number;
+    netCents: number;
+    baseSalaryCents: number;
+    allowanceCents: number;
+    commissionCents: number;
+    bonusCents: number;
+    tipShareCents: number;
+    overtimeCents: number;
+    serviceChargeCents: number;
+    adjustmentCents: number;
+    advanceRecoveryCents: number;
+    otherDeductionCents: number;
+    paidAt: Date | null;
+    notes: string | null;
+    createdByUserId: string | null;
+    approvedByUserId: string | null;
+    approvedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+    staff?: {
+      id: string;
+      displayName: string;
+      email: string | null;
+      phone: string | null;
+      providerProfile?: {
+        registryCode: string | null;
+        payoutProfile: Prisma.JsonValue | null;
+      } | null;
+    } | null;
+    tenant?: { id: string; name: string } | null;
+    branch?: { id: string; name: string | null; code: string } | null;
+    payrollRun?: { id: string; status: string } | null;
+    compensationRows?: CompensationLike[];
+    disbursements?: Array<{
+      id: string;
+      method: string;
+      status: string;
+      amountCents: number;
+      reference: string | null;
+      accountMask: string | null;
+      recipientLabel: string | null;
+      proofNote: string | null;
+      externalTransactionId: string | null;
+      recordedByUserId: string | null;
+      recordedAt: Date;
+      createdAt: Date;
+    }>;
+  }) {
+    const providerProfilePayload =
+      row.staff?.providerProfile &&
+      typeof row.staff.providerProfile === 'object' &&
+      !Array.isArray(row.staff.providerProfile)
+        ? (row.staff.providerProfile as Record<string, unknown>)
+        : null;
+    const payoutProfilePayload =
+      providerProfilePayload?.payoutProfile &&
+      typeof providerProfilePayload.payoutProfile === 'object' &&
+      !Array.isArray(providerProfilePayload.payoutProfile)
+        ? (providerProfilePayload.payoutProfile as Record<string, unknown>)
+        : null;
+
+    return {
+      id: row.id,
+      tenantId: row.tenantId,
+      branchId: row.branchId,
+      staffId: row.staffId,
+      payrollRunId: row.payrollRunId,
+      slipNumber: row.slipNumber,
+      status: row.status,
+      currency: row.currency,
+      periodLabel: row.periodLabel,
+      periodStart: row.periodStart,
+      periodEnd: row.periodEnd,
+      effectiveDate: row.effectiveDate,
+      grossCents: row.grossCents,
+      deductionCents: row.deductionCents,
+      netCents: row.netCents,
+      baseSalaryCents: row.baseSalaryCents,
+      allowanceCents: row.allowanceCents,
+      commissionCents: row.commissionCents,
+      bonusCents: row.bonusCents,
+      tipShareCents: row.tipShareCents,
+      overtimeCents: row.overtimeCents,
+      serviceChargeCents: row.serviceChargeCents,
+      adjustmentCents: row.adjustmentCents,
+      advanceRecoveryCents: row.advanceRecoveryCents,
+      otherDeductionCents: row.otherDeductionCents,
+      paidAt: row.paidAt,
+      notes: row.notes,
+      createdByUserId: row.createdByUserId,
+      approvedByUserId: row.approvedByUserId,
+      approvedAt: row.approvedAt,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      staff: row.staff
+        ? {
+            ...row.staff,
+            providerProfile: row.staff.providerProfile
+              ? {
+                  registryCode:
+                    typeof providerProfilePayload?.registryCode === 'string'
+                      ? providerProfilePayload.registryCode
+                      : null,
+                  payoutProfile: payoutProfilePayload
+                      ? {
+                          method:
+                            typeof payoutProfilePayload.method === 'string'
+                              ? payoutProfilePayload.method
+                              : null,
+                          recipientLabel:
+                            typeof payoutProfilePayload.recipientLabel === 'string'
+                              ? payoutProfilePayload.recipientLabel
+                              : null,
+                          accountMask:
+                            typeof payoutProfilePayload.accountMask === 'string'
+                              ? payoutProfilePayload.accountMask
+                              : null,
+                          note:
+                            typeof payoutProfilePayload.note === 'string'
+                              ? payoutProfilePayload.note
+                              : null,
+                        }
+                      : null,
+                }
+              : null,
+          }
+        : null,
+      tenant: row.tenant ?? null,
+      branch: row.branch ?? null,
+      payrollRun: row.payrollRun ?? null,
+      compensationRows: (row.compensationRows ?? []).map((line) => this.mapCompensation(line)),
+      disbursements: (row.disbursements ?? []).map((d) => ({
+        id: d.id,
+        method: d.method,
+        status: d.status,
+        amountCents: d.amountCents,
+        reference: d.reference,
+        accountMask: d.accountMask,
+        recipientLabel: d.recipientLabel,
+        proofNote: d.proofNote,
+        externalTransactionId: d.externalTransactionId,
+        recordedByUserId: d.recordedByUserId,
+        recordedAt: d.recordedAt,
+        createdAt: d.createdAt,
+      })),
     };
   }
 
@@ -168,6 +432,225 @@ export class StaffService {
     return currency || 'TZS';
   }
 
+  private normalizedText(value?: string | null): string | null {
+    const next = value?.trim();
+    return next ? next : null;
+  }
+
+  private lineKindIsDeduction(kind: PayrollLineKind): boolean {
+    return kind === 'DEDUCTION' || kind === 'ADVANCE_RECOVERY';
+  }
+
+  private inferLineKindFromType(type: StaffCompensationType): PayrollLineKind {
+    switch (type) {
+      case 'SALARY':
+        return 'BASIC_SALARY';
+      case 'BONUS':
+        return 'BONUS';
+      case 'COMMISSION':
+        return 'COMMISSION';
+      case 'ADVANCE':
+        return 'ADVANCE_RECOVERY';
+      case 'DEDUCTION':
+        return 'DEDUCTION';
+      default:
+        return 'ADJUSTMENT';
+    }
+  }
+
+  private inferTypeFromLineKind(kind: PayrollLineKind): StaffCompensationType {
+    switch (kind) {
+      case 'BASIC_SALARY':
+      case 'ALLOWANCE':
+      case 'OVERTIME':
+        return 'SALARY';
+      case 'COMMISSION':
+      case 'TIP_SHARE':
+      case 'SERVICE_CHARGE_SHARE':
+        return 'COMMISSION';
+      case 'BONUS':
+      case 'ADJUSTMENT':
+        return 'BONUS';
+      case 'ADVANCE_RECOVERY':
+        return 'ADVANCE';
+      case 'DEDUCTION':
+        return 'DEDUCTION';
+      default:
+        return 'BONUS';
+    }
+  }
+
+  private resolveLineKind(
+    dto: Pick<CreateStaffCompensationDto, 'lineKind' | 'type'> | Pick<UpdateStaffCompensationDto, 'lineKind' | 'type'>,
+    fallbackType: StaffCompensationType = 'SALARY',
+  ): PayrollLineKind {
+    if (dto.lineKind) {
+      return dto.lineKind;
+    }
+    return this.inferLineKindFromType((dto.type ?? fallbackType) as StaffCompensationType);
+  }
+
+  private payrollBucketKey(kind: PayrollLineKind): keyof PayrollTotals {
+    switch (kind) {
+      case 'BASIC_SALARY':
+        return 'baseSalaryCents';
+      case 'ALLOWANCE':
+        return 'allowanceCents';
+      case 'COMMISSION':
+        return 'commissionCents';
+      case 'BONUS':
+        return 'bonusCents';
+      case 'TIP_SHARE':
+        return 'tipShareCents';
+      case 'OVERTIME':
+        return 'overtimeCents';
+      case 'SERVICE_CHARGE_SHARE':
+        return 'serviceChargeCents';
+      case 'ADJUSTMENT':
+        return 'adjustmentCents';
+      case 'ADVANCE_RECOVERY':
+        return 'advanceRecoveryCents';
+      case 'DEDUCTION':
+        return 'otherDeductionCents';
+      default:
+        return 'adjustmentCents';
+    }
+  }
+
+  private emptyPayrollTotals(): PayrollTotals {
+    return {
+      grossCents: 0,
+      deductionCents: 0,
+      netCents: 0,
+      baseSalaryCents: 0,
+      allowanceCents: 0,
+      commissionCents: 0,
+      bonusCents: 0,
+      tipShareCents: 0,
+      overtimeCents: 0,
+      serviceChargeCents: 0,
+      adjustmentCents: 0,
+      advanceRecoveryCents: 0,
+      otherDeductionCents: 0,
+    };
+  }
+
+  private buildPayrollTotals(rows: CompensationLike[]): PayrollTotals {
+    const totals = this.emptyPayrollTotals();
+    for (const row of rows) {
+      const kind = (row.lineKind ?? this.inferLineKindFromType(row.type as StaffCompensationType)) as PayrollLineKind;
+      const amount = Math.max(0, row.amountCents);
+      const bucket = this.payrollBucketKey(kind);
+      totals[bucket] += amount;
+      if (this.lineKindIsDeduction(kind)) {
+        totals.deductionCents += amount;
+      } else {
+        totals.grossCents += amount;
+      }
+    }
+    totals.netCents = Math.max(0, totals.grossCents - totals.deductionCents);
+    return totals;
+  }
+
+  private async assertCompensationEditable(row: { id: string; status: string; lockedAt: Date | null }) {
+    if (row.status === 'PAID') {
+      throw new ConflictException('Paid compensation rows are locked. Record a payroll adjustment instead.');
+    }
+    if (row.lockedAt) {
+      throw new ConflictException('This compensation row is already attached to a payslip and is locked.');
+    }
+  }
+
+  private async assertSalaryPeriodUnique(
+    staffId: string,
+    args: {
+      type: StaffCompensationType;
+      lineKind: PayrollLineKind;
+      periodLabel?: string | null;
+      periodStart?: Date | null;
+      periodEnd?: Date | null;
+      excludeId?: string;
+    },
+  ) {
+    if (args.type !== 'SALARY' && args.lineKind !== 'BASIC_SALARY') {
+      return;
+    }
+
+    const periodLabel = this.normalizedText(args.periodLabel);
+    const periodStart = args.periodStart ?? null;
+    const periodEnd = args.periodEnd ?? null;
+    if (!periodLabel && !(periodStart && periodEnd)) {
+      throw new BadRequestException('Base salary rows require a period label or both periodStart and periodEnd');
+    }
+
+    const duplicate = await this.prisma.staffCompensation.findFirst({
+      where: {
+        staffId,
+        status: { not: 'VOID' },
+        id: args.excludeId ? { not: args.excludeId } : undefined,
+        AND: [
+          {
+            OR: [
+              { lineKind: 'BASIC_SALARY' },
+              { type: 'SALARY' },
+            ],
+          },
+          {
+            OR: [
+              ...(periodLabel ? [{ periodLabel }] : []),
+              ...(periodStart && periodEnd
+                ? [
+                    {
+                      periodStart,
+                      periodEnd,
+                    },
+                  ]
+                : []),
+            ],
+          },
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (duplicate) {
+      throw new ConflictException('A base salary row already exists for this staff member in the same period');
+    }
+  }
+
+  private async generateSlipNumber(tx: Prisma.TransactionClient, periodStart: Date): Promise<string> {
+    const prefix = `${periodStart.getUTCFullYear()}${String(periodStart.getUTCMonth() + 1).padStart(2, '0')}`;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const candidate = `TPS-${prefix}-${randomBytes(3).toString('hex').toUpperCase()}`;
+      const exists = await tx.payrollSlip.findFirst({
+        where: { slipNumber: candidate },
+        select: { id: true },
+      });
+      if (!exists) {
+        return candidate;
+      }
+    }
+    throw new ConflictException('Could not generate a unique payslip number');
+  }
+
+  private async actorStaffIds(actor: AuthUser): Promise<string[]> {
+    const providerProfile = await this.prisma.providerProfile.findFirst({
+      where: { userId: actor.userId, deletedAt: null },
+      select: { id: true },
+    });
+    const rows = await this.prisma.staff.findMany({
+      where: {
+        deletedAt: null,
+        OR: [
+          { userId: actor.userId },
+          ...(providerProfile ? [{ providerProfileId: providerProfile.id }] : []),
+        ],
+      },
+      select: { id: true },
+    });
+    return rows.map((row) => row.id);
+  }
+
   private async assertCanManageStaff(
     actor: AuthUser,
     tenantId: string,
@@ -195,6 +678,19 @@ export class StaffService {
       }
     }
     throw new ForbiddenException('Cannot manage staff for this tenant');
+  }
+
+  private assertTenantWidePayrollAccess(actor: AuthUser, tenantId: string, branchId?: string | null) {
+    if (branchId) {
+      return;
+    }
+    if (userIsSuperAdmin(actor)) {
+      return;
+    }
+    if (this.access.getOwnerTenantIds(actor).includes(tenantId)) {
+      return;
+    }
+    throw new ForbiddenException('Branch managers must scope payroll operations to a branch');
   }
 
   private async assertCanManageExistingStaff(actor: AuthUser, staffId: string): Promise<{
@@ -513,41 +1009,137 @@ export class StaffService {
 
     const staffIds = [...new Set(staffRows.map((row) => row.id))];
 
-    const [recentTips, recentRatings, recentCompensations, links] = await Promise.all([
-      staffIds.length
-        ? this.prisma.tip.findMany({
-            where: { staffId: { in: staffIds } },
-            orderBy: { createdAt: 'desc' },
-            take: 16,
-            include: {
-              branch: { select: { id: true, name: true } },
-              staff: { select: { id: true, displayName: true } },
+    const recentTipsPromise = staffIds.length
+      ? this.prisma.tip.findMany({
+          where: { staffId: { in: staffIds } },
+          orderBy: { createdAt: 'desc' },
+          take: 16,
+          include: {
+            branch: { select: { id: true, name: true } },
+            staff: { select: { id: true, displayName: true } },
+          },
+        })
+      : Promise.resolve([]);
+
+    const recentRatingsPromise = staffIds.length
+      ? this.prisma.rating.findMany({
+          where: { staffId: { in: staffIds }, deletedAt: null },
+          orderBy: { createdAt: 'desc' },
+          take: 16,
+          include: {
+            branch: { select: { id: true, name: true } },
+            staff: { select: { id: true, displayName: true } },
+          },
+        })
+      : Promise.resolve([]);
+
+    const recentCompensationsPromise = staffIds.length
+      ? this.prisma.staffCompensation.findMany({
+          where: { staffId: { in: staffIds } },
+          orderBy: [{ effectiveDate: 'desc' }, { createdAt: 'desc' }],
+          take: 16,
+          include: {
+            branch: { select: { id: true, name: true } },
+            staff: { select: { id: true, displayName: true } },
+          },
+        })
+      : Promise.resolve([]);
+
+    const waiterCallsPromise = staffIds.length
+      ? this.prisma.waiterCallRequest.findMany({
+          where: {
+            staffId: { in: staffIds },
+            status: { in: ['PENDING', 'ACKNOWLEDGED'] },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 24,
+          include: {
+            tenant: { select: { id: true, name: true } },
+            branch: { select: { id: true, name: true } },
+            table: { select: { code: true, label: true } },
+          },
+        })
+      : Promise.resolve([]);
+
+    const assistancePromise = staffIds.length
+      ? this.prisma.assistanceRequest.findMany({
+          where: {
+            staffId: { in: staffIds },
+            status: { in: ['PENDING', 'ACKNOWLEDGED'] },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 24,
+          include: {
+            tenant: { select: { id: true, name: true } },
+            branch: { select: { id: true, name: true } },
+            station: { select: { code: true, label: true } },
+          },
+        })
+      : Promise.resolve([]);
+
+    const diningOrdersPromise = staffIds.length
+      ? this.prisma.diningOrder.findMany({
+          where: {
+            deletedAt: null,
+            status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'SERVED'] },
+            OR: [
+              { staffId: { in: staffIds } },
+              { claimedByStaffId: { in: staffIds } },
+            ],
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 24,
+          include: {
+            tenant: { select: { id: true, name: true } },
+            branch: { select: { id: true, name: true } },
+            diningTable: { select: { code: true, label: true } },
+          },
+        })
+      : Promise.resolve([]);
+
+    const beautyBookingsPromise = staffIds.length
+      ? this.prisma.beautyBooking.findMany({
+          where: {
+            deletedAt: null,
+            status: { in: ['BOOKED', 'CONFIRMED', 'CHECKED_IN', 'IN_SERVICE'] },
+            OR: [
+              { staffId: { in: staffIds } },
+              {
+                services: {
+                  some: {
+                    staffId: { in: staffIds },
+                    status: { in: ['PENDING', 'IN_PROGRESS'] },
+                  },
+                },
+              },
+            ],
+          },
+          orderBy: [{ scheduledAt: 'asc' }, { createdAt: 'desc' }],
+          take: 24,
+          include: {
+            tenant: { select: { id: true, name: true } },
+            branch: { select: { id: true, name: true } },
+            station: { select: { code: true, label: true } },
+            services: {
+              where: {
+                OR: [
+                  { staffId: { in: staffIds } },
+                  { staffId: null },
+                ],
+              },
+              select: {
+                id: true,
+                status: true,
+                beautyService: {
+                  select: { name: true },
+                },
+              },
             },
-          })
-        : Promise.resolve([]),
-      staffIds.length
-        ? this.prisma.rating.findMany({
-            where: { staffId: { in: staffIds }, deletedAt: null },
-            orderBy: { createdAt: 'desc' },
-            take: 16,
-            include: {
-              branch: { select: { id: true, name: true } },
-              staff: { select: { id: true, displayName: true } },
-            },
-          })
-        : Promise.resolve([]),
-      staffIds.length
-        ? this.prisma.staffCompensation.findMany({
-            where: { staffId: { in: staffIds } },
-            orderBy: [{ effectiveDate: 'desc' }, { createdAt: 'desc' }],
-            take: 16,
-            include: {
-              branch: { select: { id: true, name: true } },
-              staff: { select: { id: true, displayName: true } },
-            },
-          })
-        : Promise.resolve([]),
-      Promise.all(
+          },
+        })
+      : Promise.resolve([]);
+
+    const linksPromise = Promise.all(
         staffRows.map(async (row) => {
           const [tipAll, tipCompleted, tipPendingCount, ratingStats, compensationAll, compensationPaid, compensationScheduled] =
             await Promise.all([
@@ -634,7 +1226,26 @@ export class StaffService {
             },
           };
         }),
-      ),
+      );
+
+    const [
+      recentTips,
+      recentRatings,
+      recentCompensations,
+      assignedWaiterCalls,
+      assignedAssistance,
+      assignedDiningOrders,
+      assignedBeautyBookings,
+      links,
+    ] = await Promise.all([
+      recentTipsPromise,
+      recentRatingsPromise,
+      recentCompensationsPromise,
+      waiterCallsPromise,
+      assistancePromise,
+      diningOrdersPromise,
+      beautyBookingsPromise,
+      linksPromise,
     ]);
 
     const ratingCount = links.reduce((sum, link) => sum + (link.ratingSummary.totalCount ?? 0), 0);
@@ -661,6 +1272,29 @@ export class StaffService {
                 providerProfile.skills.every((item) => typeof item === 'string')
                   ? (providerProfile.skills as string[])
                   : [],
+              payoutProfile:
+                (providerProfile as Record<string, unknown>).payoutProfile &&
+                typeof (providerProfile as Record<string, unknown>).payoutProfile === 'object' &&
+                !Array.isArray((providerProfile as Record<string, unknown>).payoutProfile)
+                  ? {
+                      method:
+                        typeof ((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).method === 'string'
+                          ? (((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).method as string)
+                          : null,
+                      recipientLabel:
+                        typeof ((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).recipientLabel === 'string'
+                          ? (((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).recipientLabel as string)
+                          : null,
+                      accountMask:
+                        typeof ((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).accountMask === 'string'
+                          ? (((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).accountMask as string)
+                          : null,
+                      note:
+                        typeof ((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).note === 'string'
+                          ? (((providerProfile as Record<string, unknown>).payoutProfile as Record<string, unknown>).note as string)
+                          : null,
+                    }
+                  : null,
               publicSlug: providerProfile.publicSlug,
               internalNotes: providerProfile.internalNotes,
               createdAt: providerProfile.createdAt,
@@ -681,6 +1315,80 @@ export class StaffService {
         categories: [...new Set(links.flatMap((link) => link.categories))],
       },
       links,
+      desk: {
+        openRequestCount: assignedWaiterCalls.length + assignedAssistance.length,
+        activeTaskCount: assignedDiningOrders.length + assignedBeautyBookings.length,
+        requestQueue: [
+          ...assignedWaiterCalls.map((row) => ({
+            id: row.id,
+            kind: 'WAITER_CALL',
+            vertical: 'FOOD_DINING',
+            tenantId: row.tenantId,
+            tenantName: row.tenant.name,
+            branchId: row.branchId,
+            branchName: row.branch.name,
+            status: row.status,
+            locationLabel: row.table ? `${row.table.code}${row.table.label ? ` · ${row.table.label}` : ''}` : null,
+            notes: row.notes,
+            createdAt: row.createdAt,
+          })),
+          ...assignedAssistance.map((row) => ({
+            id: row.id,
+            kind: 'ASSISTANCE_REQUEST',
+            vertical: 'BEAUTY_GROOMING',
+            tenantId: row.tenantId,
+            tenantName: row.tenant.name,
+            branchId: row.branchId,
+            branchName: row.branch.name,
+            status: row.status,
+            locationLabel: row.station ? `${row.station.code}${row.station.label ? ` · ${row.station.label}` : ''}` : null,
+            notes: row.notes,
+            createdAt: row.createdAt,
+          })),
+        ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+        taskQueue: [
+          ...assignedDiningOrders.map((row) => ({
+            id: row.id,
+            kind: 'DINING_ORDER',
+            vertical: 'FOOD_DINING',
+            tenantId: row.tenantId,
+            tenantName: row.tenant.name,
+            branchId: row.branchId,
+            branchName: row.branch.name,
+            status: row.status,
+            reference: row.orderNumber,
+            customerLabel: row.customerPhone,
+            locationLabel: row.diningTable ? `${row.diningTable.code}${row.diningTable.label ? ` · ${row.diningTable.label}` : ''}` : null,
+            amountCents: row.totalCents,
+            currency: row.currency,
+            scheduledAt: null,
+            serviceSummary: null,
+            createdAt: row.createdAt,
+          })),
+          ...assignedBeautyBookings.map((row) => ({
+            id: row.id,
+            kind: 'BEAUTY_BOOKING',
+            vertical: 'BEAUTY_GROOMING',
+            tenantId: row.tenantId,
+            tenantName: row.tenant.name,
+            branchId: row.branchId,
+            branchName: row.branch.name,
+            status: row.status,
+            reference: row.bookingNumber,
+            customerLabel: row.customerName ?? row.customerPhone ?? null,
+            locationLabel: row.station ? `${row.station.code}${row.station.label ? ` · ${row.station.label}` : ''}` : null,
+            amountCents: row.totalCents,
+            currency: row.currency,
+            scheduledAt: row.scheduledAt,
+            serviceSummary: row.services.map((service) => service.beautyService.name).slice(0, 3),
+            createdAt: row.createdAt,
+          })),
+        ].sort((a, b) => {
+          const aTime = new Date(a.scheduledAt ?? a.createdAt).getTime();
+          const bTime = new Date(b.scheduledAt ?? b.createdAt).getTime();
+          return aTime - bTime;
+        }),
+      },
       recentTips: recentTips.map((tip) => ({
         id: tip.id,
         staffId: tip.staffId,
@@ -734,6 +1442,9 @@ export class StaffService {
         where: { tenantId, deletedAt: null },
         orderBy: { createdAt: 'desc' },
         take: 500,
+        include: {
+          providerProfile: { select: { registryCode: true } },
+        },
       });
       return rows.map((r) => this.mapStaff(r));
     }
@@ -741,6 +1452,9 @@ export class StaffService {
       const rows = await this.prisma.staff.findMany({
         where: { tenantId, deletedAt: null },
         orderBy: { createdAt: 'desc' },
+        include: {
+          providerProfile: { select: { registryCode: true } },
+        },
       });
       return rows.map((r) => this.mapStaff(r));
     }
@@ -763,6 +1477,9 @@ export class StaffService {
         ],
       },
       orderBy: { createdAt: 'desc' },
+      include: {
+        providerProfile: { select: { registryCode: true } },
+      },
     });
     return rows.map((r) => this.mapStaff(r));
   }
@@ -818,6 +1535,9 @@ export class StaffService {
       where,
       orderBy: { createdAt: 'desc' },
       take: 25,
+      include: {
+        providerProfile: { select: { registryCode: true } },
+      },
     });
     return rows.map((r) => this.mapStaff(r));
   }
@@ -826,6 +1546,9 @@ export class StaffService {
     await this.assertCanManageExistingStaff(actor, id);
     const s = await this.prisma.staff.findFirst({
       where: { id, deletedAt: null },
+      include: {
+        providerProfile: { select: { registryCode: true } },
+      },
     });
     if (!s) {
       throw new NotFoundException('Staff not found');
@@ -1124,6 +1847,49 @@ export class StaffService {
     return rows.map((row) => this.mapCompensation(row));
   }
 
+  async listCompensationFeed(actor: AuthUser, tenantId: string, branchId?: string) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('tenantId query is required');
+    }
+    await this.access.assertReadableTenant(actor, tenantId);
+    await this.assertCanManageStaff(actor, tenantId, { branchId: branchId?.trim() || undefined });
+
+    const rows = await this.prisma.staffCompensation.findMany({
+      where: {
+        tenantId,
+        ...(branchId?.trim() ? { branchId: branchId.trim() } : {}),
+      },
+      orderBy: [{ effectiveDate: 'desc' }, { createdAt: 'desc' }],
+      take: 240,
+      include: {
+        staff: {
+          select: {
+            id: true,
+            displayName: true,
+            roleInTenant: true,
+            status: true,
+          },
+        },
+        branch: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+          },
+        },
+      },
+    });
+
+    return rows.map((row) => ({
+      ...this.mapCompensation(row),
+      staffName: row.staff.displayName,
+      roleInTenant: row.staff.roleInTenant,
+      staffStatus: row.staff.status,
+      branchName: row.branch?.name ?? null,
+      branchCode: row.branch?.code ?? null,
+    }));
+  }
+
   async createCompensation(
     actor: AuthUser,
     staffId: string,
@@ -1145,24 +1911,45 @@ export class StaffService {
       await this.assertCanManageStaff(actor, tenantId, { branchId });
     }
 
-    const status = dto.status ?? 'SCHEDULED';
+    const lineKind = this.resolveLineKind(dto, dto.type ?? 'SALARY');
+    const type = (dto.type ?? this.inferTypeFromLineKind(lineKind)) as StaffCompensationType;
+    const status = (dto.status ?? 'SCHEDULED') as StaffCompensationStatus;
+    if (status === 'PAID') {
+      throw new BadRequestException('Use payroll disbursement to mark compensation as paid');
+    }
+    if (status === 'VOID') {
+      throw new BadRequestException('Create the row first, then void it if needed');
+    }
     const effectiveDate = this.asDate(dto.effectiveDate) ?? new Date();
-    const paidAt = this.asDate(dto.paidAt) ?? (status === 'PAID' ? effectiveDate : null);
+    const periodStart = this.asDate(dto.periodStart) ?? null;
+    const periodEnd = this.asDate(dto.periodEnd) ?? null;
+    const periodLabel = this.normalizedText(dto.periodLabel);
+
+    await this.assertSalaryPeriodUnique(staffId, {
+      type,
+      lineKind,
+      periodLabel,
+      periodStart,
+      periodEnd,
+    });
 
     const row = await this.prisma.staffCompensation.create({
       data: {
         tenantId,
         branchId,
         staffId,
-        type: dto.type ?? 'SALARY',
+        type,
         status,
+        lineKind,
+        label: this.normalizedText(dto.label),
+        sourceReference: this.normalizedText(dto.sourceReference),
         amountCents: Math.max(0, Math.floor(dto.amountCents)),
         currency: this.normalizedCurrency(dto.currency),
-        periodLabel: dto.periodLabel?.trim() || null,
-        periodStart: this.asDate(dto.periodStart),
-        periodEnd: this.asDate(dto.periodEnd),
+        periodLabel,
+        periodStart,
+        periodEnd,
         effectiveDate,
-        paidAt,
+        paidAt: null,
         notes: dto.notes?.trim() || null,
         createdByUserId: actor.userId,
       },
@@ -1179,6 +1966,7 @@ export class StaffService {
       summary: `Compensation created for ${staff.displayName}`,
       details: {
         type: row.type,
+        lineKind: row.lineKind,
         status: row.status,
         amountCents: row.amountCents,
         currency: row.currency,
@@ -1207,6 +1995,7 @@ export class StaffService {
     if (!existing) {
       throw new NotFoundException('Compensation row not found');
     }
+    await this.assertCompensationEditable(existing);
 
     const branchId = dto.branchId === undefined ? existing.branchId : dto.branchId?.trim() || null;
     if (branchId) {
@@ -1214,28 +2003,44 @@ export class StaffService {
       await this.assertCanManageStaff(actor, tenantId, { branchId });
     }
 
-    const nextStatus = dto.status ?? existing.status;
+    const lineKind = this.resolveLineKind(dto, existing.type as StaffCompensationType);
+    const nextType = (dto.type ?? this.inferTypeFromLineKind(lineKind)) as StaffCompensationType;
+    const nextStatus = (dto.status ?? existing.status) as StaffCompensationStatus;
+    if (nextStatus === 'PAID') {
+      throw new BadRequestException('Use payroll disbursement to mark compensation as paid');
+    }
     const nextEffectiveDate = this.asDate(dto.effectiveDate) ?? undefined;
-    const nextPaidAt =
-      dto.paidAt !== undefined
-        ? this.asDate(dto.paidAt)
-        : dto.status === 'PAID' && existing.paidAt == null
-          ? new Date()
-          : undefined;
+    const nextPeriodStart = dto.periodStart === undefined ? existing.periodStart : this.asDate(dto.periodStart);
+    const nextPeriodEnd = dto.periodEnd === undefined ? existing.periodEnd : this.asDate(dto.periodEnd);
+    const nextPeriodLabel =
+      dto.periodLabel === undefined ? existing.periodLabel : this.normalizedText(dto.periodLabel);
+
+    await this.assertSalaryPeriodUnique(staffId, {
+      type: nextType,
+      lineKind,
+      periodLabel: nextPeriodLabel,
+      periodStart: nextPeriodStart,
+      periodEnd: nextPeriodEnd,
+      excludeId: compensationId,
+    });
 
     const updated = await this.prisma.staffCompensation.update({
       where: { id: compensationId },
       data: {
         branchId,
-        type: dto.type ?? undefined,
+        type: nextType === existing.type ? undefined : nextType,
         status: nextStatus === existing.status ? undefined : nextStatus,
+        lineKind: lineKind === existing.lineKind ? undefined : lineKind,
+        label: dto.label === undefined ? undefined : this.normalizedText(dto.label),
+        sourceReference:
+          dto.sourceReference === undefined ? undefined : this.normalizedText(dto.sourceReference),
         amountCents: dto.amountCents == null ? undefined : Math.max(0, Math.floor(dto.amountCents)),
         currency: dto.currency === undefined ? undefined : this.normalizedCurrency(dto.currency),
-        periodLabel: dto.periodLabel === undefined ? undefined : dto.periodLabel?.trim() || null,
-        periodStart: this.asDate(dto.periodStart),
-        periodEnd: this.asDate(dto.periodEnd),
+        periodLabel: dto.periodLabel === undefined ? undefined : nextPeriodLabel,
+        periodStart: dto.periodStart === undefined ? undefined : nextPeriodStart,
+        periodEnd: dto.periodEnd === undefined ? undefined : nextPeriodEnd,
         effectiveDate: nextEffectiveDate,
-        paidAt: nextPaidAt,
+        paidAt: undefined,
         notes: dto.notes === undefined ? undefined : dto.notes?.trim() || null,
       },
     });
@@ -1255,6 +2060,543 @@ export class StaffService {
     });
 
     return this.mapCompensation(updated);
+  }
+
+  async listPayrollRuns(actor: AuthUser, tenantId: string, branchId?: string) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('tenantId query is required');
+    }
+    this.assertTenantWidePayrollAccess(actor, tenantId, branchId);
+    await this.access.assertReadableTenant(actor, tenantId);
+    await this.assertCanManageStaff(actor, tenantId, { branchId: branchId?.trim() || undefined });
+
+    const rows = await this.prisma.payrollRun.findMany({
+      where: {
+        tenantId,
+        ...(branchId?.trim() ? { branchId: branchId.trim() } : {}),
+      },
+      orderBy: [{ periodEnd: 'desc' }, { createdAt: 'desc' }],
+      take: 48,
+      include: {
+        slips: {
+          select: {
+            id: true,
+            staffId: true,
+            status: true,
+            grossCents: true,
+            deductionCents: true,
+            netCents: true,
+          },
+        },
+      },
+    });
+
+    return rows.map((row) => this.mapPayrollRun(row));
+  }
+
+  async createPayrollRun(actor: AuthUser, dto: CreatePayrollRunDto, meta: StaffRequestMeta) {
+    await this.access.assertWritableTenant(actor, dto.tenantId);
+    await this.assertCanManageStaff(actor, dto.tenantId, { branchId: dto.branchId ?? undefined });
+
+    const tenantId = dto.tenantId.trim();
+    const branchId = dto.branchId?.trim() || null;
+    this.assertTenantWidePayrollAccess(actor, tenantId, branchId);
+    if (branchId) {
+      await this.access.assertBranchBelongsToTenant(branchId, tenantId);
+    }
+
+    const periodLabel = this.normalizedText(dto.periodLabel);
+    if (!periodLabel) {
+      throw new BadRequestException('periodLabel is required');
+    }
+    const periodStart = this.asDate(dto.periodStart);
+    const periodEnd = this.asDate(dto.periodEnd);
+    if (!periodStart || !periodEnd) {
+      throw new BadRequestException('periodStart and periodEnd are required');
+    }
+    if (periodStart.getTime() > periodEnd.getTime()) {
+      throw new BadRequestException('periodStart must be before periodEnd');
+    }
+
+    const existingRun = await this.prisma.payrollRun.findFirst({
+      where: {
+        tenantId,
+        branchId,
+        periodLabel,
+        periodStart,
+        periodEnd,
+        status: { in: ['SUBMITTED', 'APPROVED', 'PAID', 'RECONCILED'] },
+      },
+      select: { id: true },
+    });
+    if (existingRun) {
+      throw new ConflictException('A payroll run already exists for this scope and period');
+    }
+
+    const eligibleRows = await this.prisma.staffCompensation.findMany({
+      where: {
+        tenantId,
+        ...(branchId ? { branchId } : {}),
+        payrollSlipId: null,
+        payrollRunId: null,
+        lockedAt: null,
+        status: { in: ['SCHEDULED', 'APPROVED'] },
+        OR: [
+          { periodLabel },
+          {
+            AND: [
+              { periodStart: { not: null, lte: periodEnd } },
+              { periodEnd: { not: null, gte: periodStart } },
+            ],
+          },
+          {
+            AND: [
+              { periodStart: null },
+              { periodEnd: null },
+              { effectiveDate: { gte: periodStart, lte: periodEnd } },
+            ],
+          },
+        ],
+      },
+      orderBy: [{ staffId: 'asc' }, { effectiveDate: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    if (!eligibleRows.length) {
+      throw new ConflictException('No eligible compensation rows found for this payroll run');
+    }
+
+    const currencies = new Set(eligibleRows.map((row) => row.currency));
+    const currency = this.normalizedCurrency(dto.currency ?? Array.from(currencies)[0] ?? 'TZS');
+    if (currencies.size > 1 || Array.from(currencies).some((value) => value !== currency)) {
+      throw new ConflictException('All compensation rows in a payroll run must share the same currency');
+    }
+
+    const rowsByStaff = new Map<string, typeof eligibleRows>();
+    for (const row of eligibleRows) {
+      const list = rowsByStaff.get(row.staffId) ?? [];
+      list.push(row);
+      rowsByStaff.set(row.staffId, list);
+    }
+
+    const createdRun = await this.prisma.$transaction(async (tx) => {
+      const run = await tx.payrollRun.create({
+        data: {
+          tenantId,
+          branchId,
+          status: 'SUBMITTED',
+          currency,
+          periodLabel,
+          periodStart,
+          periodEnd,
+          notes: this.normalizedText(dto.notes),
+          createdByUserId: actor.userId,
+        },
+      });
+
+      for (const [staffRowId, rows] of rowsByStaff.entries()) {
+        const totals = this.buildPayrollTotals(rows as CompensationLike[]);
+        const branchIds = new Set(rows.map((row) => row.branchId).filter((value): value is string => Boolean(value)));
+        const slipBranchId = branchIds.size === 1 ? Array.from(branchIds)[0] : branchId;
+        const slipNumber = await this.generateSlipNumber(tx, periodStart);
+        const slip = await tx.payrollSlip.create({
+          data: {
+            tenantId,
+            branchId: slipBranchId,
+            staffId: staffRowId,
+            payrollRunId: run.id,
+            slipNumber,
+            status: 'SUBMITTED',
+            currency,
+            periodLabel,
+            periodStart,
+            periodEnd,
+            effectiveDate: periodEnd,
+            ...totals,
+            notes: this.normalizedText(dto.notes),
+            createdByUserId: actor.userId,
+          },
+        });
+
+        await tx.staffCompensation.updateMany({
+          where: { id: { in: rows.map((row) => row.id) } },
+          data: {
+            payrollRunId: run.id,
+            payrollSlipId: slip.id,
+            lockedAt: new Date(),
+          },
+        });
+      }
+
+      return run;
+    });
+
+    await this.audit.write({
+      action: 'CREATE',
+      entityType: 'PayrollRun',
+      entityId: createdRun.id,
+      tenantId,
+      branchId: createdRun.branchId ?? undefined,
+      actorUserId: actor.userId,
+      correlationId: meta.correlationId,
+      summary: `Payroll run created for ${periodLabel}`,
+      details: {
+        periodLabel,
+        periodStart,
+        periodEnd,
+        currency,
+        rows: eligibleRows.length,
+        staffCount: rowsByStaff.size,
+      } as Prisma.InputJsonValue,
+      ipAddress: meta.ipAddress,
+      userAgent: meta.userAgent,
+    });
+
+    return this.getPayrollRun(actor, createdRun.id);
+  }
+
+  async getPayrollRun(actor: AuthUser, runId: string) {
+    const run = await this.prisma.payrollRun.findFirst({
+      where: { id: runId },
+      include: {
+        branch: { select: { id: true, name: true, code: true } },
+        slips: {
+          orderBy: [{ netCents: 'desc' }, { createdAt: 'asc' }],
+          include: {
+            staff: {
+              select: {
+                id: true,
+                displayName: true,
+                email: true,
+                phone: true,
+                providerProfile: true,
+              },
+            },
+            branch: { select: { id: true, name: true, code: true } },
+            compensationRows: {
+              orderBy: [{ effectiveDate: 'asc' }, { createdAt: 'asc' }],
+            },
+            disbursements: {
+              orderBy: [{ recordedAt: 'desc' }, { createdAt: 'desc' }],
+            },
+          },
+        },
+      },
+    });
+    if (!run) {
+      throw new NotFoundException('Payroll run not found');
+    }
+
+    await this.access.assertReadableTenant(actor, run.tenantId);
+    this.assertTenantWidePayrollAccess(actor, run.tenantId, run.branchId);
+    await this.assertCanManageStaff(actor, run.tenantId, { branchId: run.branchId ?? undefined });
+
+    return {
+      ...this.mapPayrollRun(run),
+      branch: run.branch,
+      slips: run.slips.map((slip) =>
+        this.mapPayrollSlip({
+          ...slip,
+          tenant: null,
+          payrollRun: { id: run.id, status: run.status },
+        }),
+      ),
+    };
+  }
+
+  async updatePayrollRunStatus(
+    actor: AuthUser,
+    runId: string,
+    dto: UpdatePayrollRunStatusDto,
+    meta: StaffRequestMeta,
+  ) {
+    const run = await this.prisma.payrollRun.findFirst({
+      where: { id: runId },
+      include: {
+        slips: {
+          include: {
+            disbursements: {
+              where: { status: 'RECORDED' },
+              select: { id: true, amountCents: true },
+            },
+          },
+        },
+      },
+    });
+    if (!run) {
+      throw new NotFoundException('Payroll run not found');
+    }
+
+    await this.access.assertWritableTenant(actor, run.tenantId);
+    this.assertTenantWidePayrollAccess(actor, run.tenantId, run.branchId);
+    await this.assertCanManageStaff(actor, run.tenantId, { branchId: run.branchId ?? undefined });
+
+    const target = dto.status;
+    if (target === run.status) {
+      return this.getPayrollRun(actor, runId);
+    }
+
+    if (target === 'APPROVED') {
+      if (!['SUBMITTED', 'DRAFT'].includes(run.status)) {
+        throw new ConflictException('Only submitted payroll runs can be approved');
+      }
+      await this.prisma.$transaction([
+        this.prisma.payrollRun.update({
+          where: { id: runId },
+          data: {
+            status: 'APPROVED',
+            approvedAt: new Date(),
+            approvedByUserId: actor.userId,
+          },
+        }),
+        this.prisma.payrollSlip.updateMany({
+          where: { payrollRunId: runId, status: { in: ['SUBMITTED', 'DRAFT'] } },
+          data: {
+            status: 'APPROVED',
+            approvedAt: new Date(),
+            approvedByUserId: actor.userId,
+          },
+        }),
+        this.prisma.staffCompensation.updateMany({
+          where: { payrollRunId: runId, status: 'SCHEDULED' },
+          data: { status: 'APPROVED' },
+        }),
+      ]);
+    } else if (target === 'RECONCILED') {
+      if (run.slips.some((slip) => !['PAID', 'RECONCILED'].includes(slip.status))) {
+        throw new ConflictException('All slips must be paid before a payroll run can be reconciled');
+      }
+      await this.prisma.$transaction([
+        this.prisma.payrollRun.update({
+          where: { id: runId },
+          data: {
+            status: 'RECONCILED',
+            reconciledAt: new Date(),
+          },
+        }),
+        this.prisma.payrollSlip.updateMany({
+          where: { payrollRunId: runId, status: 'PAID' },
+          data: { status: 'RECONCILED' },
+        }),
+      ]);
+    } else if (target === 'VOID') {
+      if (
+        run.slips.some(
+          (slip) =>
+            ['PAID', 'RECONCILED'].includes(slip.status) || slip.disbursements.length > 0,
+        )
+      ) {
+        throw new ConflictException('Paid payroll runs cannot be voided');
+      }
+      await this.prisma.$transaction([
+        this.prisma.payrollRun.update({
+          where: { id: runId },
+          data: {
+            status: 'VOID',
+            voidedAt: new Date(),
+          },
+        }),
+        this.prisma.payrollSlip.updateMany({
+          where: { payrollRunId: runId },
+          data: { status: 'VOID' },
+        }),
+        this.prisma.staffCompensation.updateMany({
+          where: { payrollRunId: runId },
+          data: {
+            payrollRunId: null,
+            payrollSlipId: null,
+            lockedAt: null,
+          },
+        }),
+      ]);
+    } else {
+      throw new BadRequestException('Unsupported payroll run status transition');
+    }
+
+    await this.audit.write({
+      action: 'UPDATE',
+      entityType: 'PayrollRun',
+      entityId: runId,
+      tenantId: run.tenantId,
+      branchId: run.branchId ?? undefined,
+      actorUserId: actor.userId,
+      correlationId: meta.correlationId,
+      summary: `Payroll run moved to ${target}`,
+      details: { status: target } as Prisma.InputJsonValue,
+      ipAddress: meta.ipAddress,
+      userAgent: meta.userAgent,
+    });
+
+    return this.getPayrollRun(actor, runId);
+  }
+
+  async listStaffPayslips(actor: AuthUser, staffId: string) {
+    await this.assertCanManageExistingStaff(actor, staffId);
+    const rows = await this.prisma.payrollSlip.findMany({
+      where: { staffId },
+      orderBy: [{ periodEnd: 'desc' }, { createdAt: 'desc' }],
+      include: {
+        branch: { select: { id: true, name: true, code: true } },
+        disbursements: { orderBy: [{ recordedAt: 'desc' }], take: 8 },
+        compensationRows: { orderBy: [{ effectiveDate: 'asc' }, { createdAt: 'asc' }] },
+      },
+      take: 60,
+    });
+    return rows.map((row) => this.mapPayrollSlip(row));
+  }
+
+  async getPayrollSlip(actor: AuthUser, slipId: string) {
+    const slip = await this.prisma.payrollSlip.findFirst({
+      where: { id: slipId },
+      include: {
+        tenant: { select: { id: true, name: true } },
+        branch: { select: { id: true, name: true, code: true } },
+        staff: {
+          select: {
+            id: true,
+            displayName: true,
+            email: true,
+            phone: true,
+            providerProfile: true,
+          },
+        },
+        payrollRun: { select: { id: true, status: true } },
+        compensationRows: { orderBy: [{ effectiveDate: 'asc' }, { createdAt: 'asc' }] },
+        disbursements: { orderBy: [{ recordedAt: 'desc' }, { createdAt: 'desc' }] },
+      },
+    });
+    if (!slip) {
+      throw new NotFoundException('Payslip not found');
+    }
+    await this.access.assertReadableTenant(actor, slip.tenantId);
+    this.assertTenantWidePayrollAccess(actor, slip.tenantId, slip.branchId);
+    await this.assertCanManageStaff(actor, slip.tenantId, { branchId: slip.branchId ?? undefined });
+    return this.mapPayrollSlip(slip);
+  }
+
+  async recordPayrollDisbursement(
+    actor: AuthUser,
+    slipId: string,
+    dto: RecordPayrollDisbursementDto,
+    meta: StaffRequestMeta,
+  ) {
+    const slip = await this.prisma.payrollSlip.findFirst({
+      where: { id: slipId },
+      include: {
+        disbursements: {
+          where: { status: 'RECORDED' },
+          orderBy: [{ recordedAt: 'desc' }, { createdAt: 'desc' }],
+        },
+        compensationRows: true,
+        payrollRun: {
+          include: {
+            slips: {
+              select: {
+                id: true,
+                status: true,
+              },
+            },
+          },
+        },
+        staff: { select: { id: true, displayName: true } },
+      },
+    });
+    if (!slip) {
+      throw new NotFoundException('Payslip not found');
+    }
+
+    await this.access.assertWritableTenant(actor, slip.tenantId);
+    this.assertTenantWidePayrollAccess(actor, slip.tenantId, slip.branchId);
+    await this.assertCanManageStaff(actor, slip.tenantId, { branchId: slip.branchId ?? undefined });
+    if (!['APPROVED', 'PAID'].includes(slip.status)) {
+      throw new ConflictException('Only approved payroll slips can receive disbursements');
+    }
+
+    const recordedTotal = slip.disbursements.reduce((sum, row) => sum + row.amountCents, 0);
+    const remaining = Math.max(0, slip.netCents - recordedTotal);
+    if (remaining <= 0) {
+      throw new ConflictException('This payslip is already fully disbursed');
+    }
+
+    const amountCents = dto.amountCents == null ? remaining : Math.max(0, Math.floor(dto.amountCents));
+    if (amountCents <= 0) {
+      throw new BadRequestException('Disbursement amount must be greater than zero');
+    }
+    if (amountCents > remaining) {
+      throw new ConflictException('Disbursement amount exceeds the remaining net pay');
+    }
+
+    const recordedAt = this.asDate(dto.recordedAt) ?? new Date();
+    const disbursement = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.payrollDisbursement.create({
+        data: {
+          payrollSlipId: slip.id,
+          method: dto.method as PayrollDisbursementMethod,
+          status: dto.status ?? 'RECORDED',
+          amountCents,
+          reference: this.normalizedText(dto.reference),
+          accountMask: this.normalizedText(dto.accountMask),
+          recipientLabel: this.normalizedText(dto.recipientLabel),
+          proofNote: this.normalizedText(dto.proofNote),
+          externalTransactionId: this.normalizedText(dto.externalTransactionId),
+          recordedByUserId: actor.userId,
+          recordedAt,
+        },
+      });
+
+      const nextRecorded = recordedTotal + (created.status === 'RECORDED' ? amountCents : 0);
+      if (created.status === 'RECORDED' && nextRecorded >= slip.netCents) {
+        await tx.payrollSlip.update({
+          where: { id: slip.id },
+          data: {
+            status: 'PAID',
+            paidAt: recordedAt,
+          },
+        });
+        await tx.staffCompensation.updateMany({
+          where: { payrollSlipId: slip.id },
+          data: {
+            status: 'PAID',
+            paidAt: recordedAt,
+          },
+        });
+      }
+
+      if (slip.payrollRunId) {
+        const statuses = slip.payrollRun?.slips.map((row) => (row.id === slip.id && nextRecorded >= slip.netCents ? 'PAID' : row.status)) ?? [];
+        if (statuses.length && statuses.every((status) => status === 'PAID' || status === 'RECONCILED')) {
+          await tx.payrollRun.update({
+            where: { id: slip.payrollRunId },
+            data: {
+              status: 'PAID',
+              paidAt: recordedAt,
+            },
+          });
+        }
+      }
+
+      return created;
+    });
+
+    await this.audit.write({
+      action: 'CREATE',
+      entityType: 'PayrollDisbursement',
+      entityId: disbursement.id,
+      tenantId: slip.tenantId,
+      branchId: slip.branchId ?? undefined,
+      actorUserId: actor.userId,
+      correlationId: meta.correlationId,
+      summary: `Payroll disbursement recorded for ${slip.staff.displayName}`,
+      details: {
+        slipId,
+        method: disbursement.method,
+        amountCents: disbursement.amountCents,
+        reference: disbursement.reference,
+      } as Prisma.InputJsonValue,
+      ipAddress: meta.ipAddress,
+      userAgent: meta.userAgent,
+    });
+
+    return this.getPayrollSlip(actor, slipId);
   }
 
   async updateAssignment(
@@ -1313,21 +2655,7 @@ export class StaffService {
 
   /** All compensation rows for the current user's staff profile(s) (provider workspace). */
   async listMyCompensations(actor: AuthUser) {
-    const providerProfile = await this.prisma.providerProfile.findFirst({
-      where: { userId: actor.userId, deletedAt: null },
-    });
-    const staffWhere: Prisma.StaffWhereInput = {
-      deletedAt: null,
-      OR: [
-        { userId: actor.userId },
-        ...(providerProfile ? [{ providerProfileId: providerProfile.id }] : []),
-      ],
-    };
-    const staffRows = await this.prisma.staff.findMany({
-      where: staffWhere,
-      select: { id: true },
-    });
-    const ids = staffRows.map((r) => r.id);
+    const ids = await this.actorStaffIds(actor);
     if (!ids.length) {
       return { items: [], total: 0 };
     }
@@ -1350,6 +2678,9 @@ export class StaffService {
         staffId: row.staffId,
         type: row.type,
         status: row.status,
+        lineKind: row.lineKind,
+        label: row.label,
+        sourceReference: row.sourceReference,
         amountCents: row.amountCents,
         currency: row.currency,
         periodLabel: row.periodLabel,
@@ -1358,12 +2689,80 @@ export class StaffService {
         effectiveDate: row.effectiveDate,
         paidAt: row.paidAt,
         notes: row.notes,
+        payrollRunId: row.payrollRunId,
+        payrollSlipId: row.payrollSlipId,
+        lockedAt: row.lockedAt,
         createdAt: row.createdAt,
         tenantName: row.tenant.name,
         branchName: row.branch?.name ?? null,
         staffName: row.staff.displayName,
       })),
     };
+  }
+
+  async listMyPayslips(actor: AuthUser) {
+    const ids = await this.actorStaffIds(actor);
+    if (!ids.length) {
+      return { items: [], total: 0 };
+    }
+    const rows = await this.prisma.payrollSlip.findMany({
+      where: { staffId: { in: ids } },
+      orderBy: [{ periodEnd: 'desc' }, { createdAt: 'desc' }],
+      take: 120,
+      include: {
+        tenant: { select: { id: true, name: true } },
+        branch: { select: { id: true, name: true, code: true } },
+        staff: {
+          select: {
+            id: true,
+            displayName: true,
+            email: true,
+            phone: true,
+            providerProfile: true,
+          },
+        },
+        payrollRun: { select: { id: true, status: true } },
+        compensationRows: { orderBy: [{ effectiveDate: 'asc' }, { createdAt: 'asc' }] },
+        disbursements: { orderBy: [{ recordedAt: 'desc' }, { createdAt: 'desc' }] },
+      },
+    });
+    return {
+      total: rows.length,
+      items: rows.map((row) => this.mapPayrollSlip(row)),
+    };
+  }
+
+  async getMyPayslip(actor: AuthUser, slipId: string) {
+    const ids = await this.actorStaffIds(actor);
+    if (!ids.length) {
+      throw new NotFoundException('Payslip not found');
+    }
+    const row = await this.prisma.payrollSlip.findFirst({
+      where: {
+        id: slipId,
+        staffId: { in: ids },
+      },
+      include: {
+        tenant: { select: { id: true, name: true } },
+        branch: { select: { id: true, name: true, code: true } },
+        staff: {
+          select: {
+            id: true,
+            displayName: true,
+            email: true,
+            phone: true,
+            providerProfile: true,
+          },
+        },
+        payrollRun: { select: { id: true, status: true } },
+        compensationRows: { orderBy: [{ effectiveDate: 'asc' }, { createdAt: 'asc' }] },
+        disbursements: { orderBy: [{ recordedAt: 'desc' }, { createdAt: 'desc' }] },
+      },
+    });
+    if (!row) {
+      throw new NotFoundException('Payslip not found');
+    }
+    return this.mapPayrollSlip(row);
   }
 
   async createJoinInvite(actor: AuthUser, dto: CreateStaffJoinInviteDto, meta: StaffRequestMeta) {

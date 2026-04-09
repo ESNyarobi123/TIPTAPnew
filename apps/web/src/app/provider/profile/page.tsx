@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { KeyValueList } from '@/components/ui/key-value-list';
 import { Label } from '@/components/ui/label';
 import { SectionHeader } from '@/components/ui/section-header';
+import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { StatusChip } from '@/components/ui/status-chip';
 import { Textarea } from '@/components/ui/textarea';
@@ -48,6 +49,10 @@ export default function ProviderProfilePage() {
   const [bio, setBio] = useState('');
   const [skills, setSkills] = useState('');
   const [publicSlug, setPublicSlug] = useState('');
+  const [payoutMethod, setPayoutMethod] = useState('MOBILE_MONEY');
+  const [payoutRecipientLabel, setPayoutRecipientLabel] = useState('');
+  const [payoutAccountMask, setPayoutAccountMask] = useState('');
+  const [payoutNote, setPayoutNote] = useState('');
 
   async function loadAll() {
     const token = getStoredToken();
@@ -68,6 +73,10 @@ export default function ProviderProfilePage() {
       setBio(profileData?.bio ?? '');
       setSkills(Array.isArray(profileData?.skills) ? profileData.skills.join(', ') : '');
       setPublicSlug(profileData?.publicSlug ?? slugify(profileData?.displayName ?? accountData.name ?? ''));
+      setPayoutMethod(profileData?.payoutProfile?.method ?? 'MOBILE_MONEY');
+      setPayoutRecipientLabel(profileData?.payoutProfile?.recipientLabel ?? '');
+      setPayoutAccountMask(profileData?.payoutProfile?.accountMask ?? '');
+      setPayoutNote(profileData?.payoutProfile?.note ?? '');
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : 'Failed to load profile');
     } finally {
@@ -104,6 +113,10 @@ export default function ProviderProfilePage() {
           .split(',')
           .map((x) => x.trim())
           .filter(Boolean),
+        payoutMethod: payoutMethod || null,
+        payoutRecipientLabel: payoutRecipientLabel || null,
+        payoutAccountMask: payoutAccountMask || null,
+        payoutNote: payoutNote || null,
       });
       setProfile(next);
       toast.success(next.registryCode ? `Saved. Your provider code is ${next.registryCode}` : 'Provider profile saved');
@@ -180,6 +193,15 @@ export default function ProviderProfilePage() {
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-smoke-200">Skills</p>
                   <p className="mt-2 text-sm text-smoke-400">{skillsCount} tagged skill{skillsCount === 1 ? '' : 's'}</p>
                 </div>
+                <div className="rounded-2xl border border-smoke-400/[0.07] bg-ivory-50/90 px-4 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-smoke-200">Payout</p>
+                  <p className="mt-2 text-sm text-smoke-400">
+                    {profile?.payoutProfile?.method?.replaceAll('_', ' ') ?? 'Not set'}
+                  </p>
+                  <p className="mt-1 text-xs text-smoke-200">
+                    {profile?.payoutProfile?.accountMask ?? 'Add a masked destination for payroll'}
+                  </p>
+                </div>
                 {!hasProviderIdentity ? (
                   <p className="rounded-xl border border-teal-900/10 bg-teal-50/30 p-3 text-xs text-smoke-200">
                     Save once to generate your provider code.
@@ -232,6 +254,42 @@ export default function ProviderProfilePage() {
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
                     placeholder="What should businesses and customers know about your style or service strengths?"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="pp-payout-method">Payout method</Label>
+                  <Select id="pp-payout-method" value={payoutMethod} onChange={(e) => setPayoutMethod(e.target.value)}>
+                    <option value="MOBILE_MONEY">Mobile money</option>
+                    <option value="BANK_TRANSFER">Bank transfer</option>
+                    <option value="CASH">Cash</option>
+                    <option value="MANUAL_OTHER">Manual other</option>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="pp-payout-recipient">Recipient label</Label>
+                  <Input
+                    id="pp-payout-recipient"
+                    value={payoutRecipientLabel}
+                    onChange={(e) => setPayoutRecipientLabel(e.target.value)}
+                    placeholder="Name used during payout"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="pp-payout-mask">Account / phone mask</Label>
+                  <Input
+                    id="pp-payout-mask"
+                    value={payoutAccountMask}
+                    onChange={(e) => setPayoutAccountMask(e.target.value)}
+                    placeholder="+2557***123 or ****9821"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="pp-payout-note">Payout note</Label>
+                  <Input
+                    id="pp-payout-note"
+                    value={payoutNote}
+                    onChange={(e) => setPayoutNote(e.target.value)}
+                    placeholder="Optional payroll routing note"
                   />
                 </div>
                 <div className="flex flex-wrap gap-2 lg:col-span-2">

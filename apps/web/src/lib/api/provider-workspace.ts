@@ -59,6 +59,12 @@ export type ProviderWorkspace = {
     publicRatingAvg?: number | null;
     publicRatingCount?: number;
     skills?: string[];
+    payoutProfile?: {
+      method?: string | null;
+      recipientLabel?: string | null;
+      accountMask?: string | null;
+      note?: string | null;
+    } | null;
     publicSlug?: string | null;
     internalNotes?: string | null;
     createdAt?: string;
@@ -118,6 +124,41 @@ export type ProviderWorkspace = {
     paidAt?: string | null;
     createdAt: string;
   }[];
+  desk: {
+    openRequestCount: number;
+    activeTaskCount: number;
+    requestQueue: {
+      id: string;
+      kind: 'WAITER_CALL' | 'ASSISTANCE_REQUEST';
+      vertical: 'FOOD_DINING' | 'BEAUTY_GROOMING';
+      tenantId: string;
+      tenantName: string;
+      branchId: string;
+      branchName: string;
+      status: string;
+      locationLabel?: string | null;
+      notes?: string | null;
+      createdAt: string;
+    }[];
+    taskQueue: {
+      id: string;
+      kind: 'DINING_ORDER' | 'BEAUTY_BOOKING';
+      vertical: 'FOOD_DINING' | 'BEAUTY_GROOMING';
+      tenantId: string;
+      tenantName: string;
+      branchId: string;
+      branchName: string;
+      status: string;
+      reference: string;
+      customerLabel?: string | null;
+      locationLabel?: string | null;
+      amountCents?: number | null;
+      currency?: string | null;
+      scheduledAt?: string | null;
+      serviceSummary?: string[] | null;
+      createdAt: string;
+    }[];
+  };
 };
 
 export function getProviderWorkspace(token: string) {

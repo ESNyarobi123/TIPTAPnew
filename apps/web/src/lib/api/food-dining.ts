@@ -151,3 +151,29 @@ export function patchBillRequest(token: string, id: string, body: { status?: str
   return apiFetch<unknown>(`/food-dining/bill-requests/${encodeURIComponent(id)}`, { method: 'PATCH', token, json: body });
 }
 
+export function listDiningOrders(
+  token: string,
+  params: { tenantId: string; branchId?: string | null; status?: string | null; staffId?: string | null },
+) {
+  return apiFetch<unknown[]>(
+    `/food-dining/orders${toQueryString({
+      tenantId: params.tenantId,
+      branchId: params.branchId ?? undefined,
+      status: params.status ?? undefined,
+      staffId: params.staffId ?? undefined,
+    })}`,
+    { token },
+  );
+}
+
+export function patchDiningOrder(
+  token: string,
+  id: string,
+  body: { status?: string; notes?: string; taxCents?: number; paymentMethod?: string; paidAt?: string },
+) {
+  return apiFetch<unknown>(`/food-dining/orders/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    token,
+    json: body,
+  });
+}

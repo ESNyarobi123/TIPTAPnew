@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { PayrollDisbursementMethod } from '@prisma/client';
+import { IsArray, IsEnum, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 export class UpsertMyProviderProfileDto {
   @ApiPropertyOptional()
@@ -32,4 +33,27 @@ export class UpsertMyProviderProfileDto {
   @IsArray()
   @IsString({ each: true })
   skills?: string[];
+
+  @ApiPropertyOptional({ enum: PayrollDisbursementMethod })
+  @IsOptional()
+  @IsEnum(PayrollDisbursementMethod)
+  payoutMethod?: PayrollDisbursementMethod;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  payoutRecipientLabel?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  payoutAccountMask?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(600)
+  payoutNote?: string;
 }

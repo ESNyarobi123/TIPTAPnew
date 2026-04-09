@@ -10,8 +10,7 @@ import { Label } from '@/components/ui/label';
 import { MetricMini } from '@/components/ui/metric-mini';
 import { SectionHeader } from '@/components/ui/section-header';
 import { Select } from '@/components/ui/select';
-import { StatusChip } from '@/components/ui/status-chip';
-import { Table, Td, Th } from '@/components/ui/table';
+import { EntityQrCard } from '@/components/workspace/entity-qr-card';
 import { ApiError } from '@/lib/api/client';
 import {
   createStaff,
@@ -20,7 +19,16 @@ import {
   listStaffJoinInvites,
   revokeStaffJoinInvite,
 } from '@/lib/api/staff';
+import { createQr, listQr, rotateQr, type QrMutationResult, type QrRecord } from '@/lib/api/qr';
 import { getStoredToken } from '@/lib/auth/storage';
+import {
+  buildLaunchPageUrl,
+  cacheQrLaunchPack,
+  copyTextToClipboard,
+  downloadQrSvgAsset,
+  listCachedQrLaunchPacks,
+  whatsappDeepLink,
+} from '@/lib/qr-launch';
 import { toast } from '@/lib/toast';
 import { useScope } from '@/providers/scope-provider';
 
@@ -33,6 +41,7 @@ type StaffRow = {
   phone?: string | null;
   branchId?: string | null;
   publicHandle?: string | null;
+  providerRegistryCode?: string | null;
 };
 
 function asRow(x: unknown): StaffRow {
@@ -46,16 +55,41 @@ function asRow(x: unknown): StaffRow {
     phone: typeof o.phone === 'string' ? o.phone : (o.phone === null ? null : undefined),
     branchId: typeof o.branchId === 'string' ? o.branchId : (o.branchId === null ? null : undefined),
     publicHandle: typeof o.publicHandle === 'string' ? o.publicHandle : (o.publicHandle === null ? null : undefined),
+    providerRegistryCode:
+      typeof o.providerRegistryCode === 'string'
+        ? o.providerRegistryCode
+        : (o.providerRegistryCode === null ? null : undefined),
   };
 }
 
 const roles = ['SERVICE_STAFF', 'CASHIER', 'BRANCH_MANAGER', 'SUPPORT_AGENT'] as const;
 
+function humanizeRole(value?: string | null) {
+  return (value ?? 'SERVICE_STAFF').replaceAll('_', ' ');
+}
+
+function safeFileToken(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'tiptap';
+}
+
+function pickLatestQr(rows: QrRecord[]) {
+  return [...rows].sort((a, b) => {
+    const aTime = new Date(a.updatedAt ?? a.createdAt ?? 0).getTime();
+    const bTime = new Date(b.updatedAt ?? b.createdAt ?? 0).getTime();
+    const aRank = a.status === 'ACTIVE' ? 1 : 0;
+    const bRank = b.status === 'ACTIVE' ? 1 : 0;
+    return bRank - aRank || bTime - aTime;
+  })[0] ?? null;
+}
+
 export default function StaffIndexPage() {
   const { tenantId, branchId, branches } = useScope();
   const [rows, setRows] = useState<StaffRow[]>([]);
+  const [qrRows, setQrRows] = useState<QrRecord[]>([]);
+  const [launchPacks, setLaunchPacks] = useState<Record<string, QrMutationResult>>({});
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
+  const [qrPendingId, setQrPendingId] = useState('');
   const [query, setQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | (typeof roles)[number]>('ALL');
   const [displayName, setDisplayName] = useState('');
@@ -70,6 +104,7 @@ export default function StaffIndexPage() {
   const [inviteLoading, setInviteLoading] = useState(false);
   const [invitePending, setInvitePending] = useState(false);
   const [lastGeneratedCode, setLastGeneratedCode] = useState<string | null>(null);
+  const [origin, setOrigin] = useState('');
 
   const canCreate = useMemo(() => Boolean(tenantId), [tenantId]);
   const branchNameById = useMemo(
@@ -80,17 +115,24 @@ export default function StaffIndexPage() {
     [branches],
   );
 
+  useEffect(() => {
+    setOrigin(window.location.origin);
+    setLaunchPacks(listCachedQrLaunchPacks());
+  }, []);
+
   async function refresh() {
     const token = getStoredToken();
     if (!token || !tenantId) {
       setRows([]);
+      setQrRows([]);
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const list = await listStaff(token, tenantId);
-      setRows((Array.isArray(list) ? list : []).map(asRow).filter((row) => row.id));
+      const [staffList, qrList] = await Promise.all([listStaff(token, tenantId), listQr(token, tenantId)]);
+      setRows((Array.isArray(staffList) ? staffList : []).map(asRow).filter((row) => row.id));
+      setQrRows(Array.isArray(qrList) ? qrList : []);
     } catch (error) {
       toast.error(error instanceof ApiError ? error.message : 'Failed to load staff');
     } finally {
@@ -186,6 +228,19 @@ export default function StaffIndexPage() {
     });
   }, [query, roleFilter, rows]);
 
+  const staffQrMap = useMemo(() => {
+    const grouped = new Map<string, QrRecord[]>();
+    for (const row of qrRows) {
+      if (row.type !== 'STAFF_QR' || !row.staffId) {
+        continue;
+      }
+      const bucket = grouped.get(row.staffId) ?? [];
+      bucket.push(row);
+      grouped.set(row.staffId, bucket);
+    }
+    return new Map(Array.from(grouped.entries()).map(([staffId, entries]) => [staffId, pickLatestQr(entries)]));
+  }, [qrRows]);
+
   const activeCount = rows.filter((row) => row.status === 'ACTIVE').length;
   const inactiveCount = rows.filter((row) => row.status && row.status !== 'ACTIVE').length;
   const handleCount = rows.filter((row) => Boolean(row.publicHandle)).length;
@@ -221,12 +276,79 @@ export default function StaffIndexPage() {
     }
   }
 
+  async function handleQrMutation(row: StaffRow) {
+    const token = getStoredToken();
+    if (!token || !tenantId) {
+      return;
+    }
+    const existingQr = staffQrMap.get(row.id) ?? null;
+    setQrPendingId(row.id);
+    try {
+      const launchPack = existingQr
+        ? await rotateQr(token, existingQr.id)
+        : await createQr(token, {
+            tenantId,
+            branchId: row.branchId ?? null,
+            type: 'STAFF_QR',
+            staffId: row.id,
+          });
+      cacheQrLaunchPack(launchPack);
+      setLaunchPacks((current) => ({ ...current, [launchPack.id]: launchPack }));
+      toast.success(existingQr ? 'Staff QR refreshed' : 'Staff QR generated');
+      await refresh();
+    } catch (error) {
+      toast.error(error instanceof ApiError ? error.message : 'Could not prepare staff QR');
+    } finally {
+      setQrPendingId('');
+    }
+  }
+
+  async function handleCopyLaunch(row: StaffRow) {
+    const qr = staffQrMap.get(row.id) ?? null;
+    const launchPack = qr ? launchPacks[qr.id] ?? null : null;
+    const prefillText = launchPack?.customerLaunch?.prefillText;
+    if (!prefillText) {
+      toast.error('Refresh this QR first to load the launch text');
+      return;
+    }
+    const result = await copyTextToClipboard(prefillText, 'WhatsApp text');
+    if (result.ok) toast.success(result.message);
+    else toast.error(result.message);
+  }
+
+  async function handleDownloadQr(row: StaffRow) {
+    const qr = staffQrMap.get(row.id) ?? null;
+    const launchPack = qr ? launchPacks[qr.id] ?? null : null;
+    const launchUrl = launchPack ? buildLaunchPageUrl(origin, launchPack) : null;
+    if (!launchUrl || !qr) {
+      toast.error('Refresh this QR first to load the printable QR');
+      return;
+    }
+    try {
+      await downloadQrSvgAsset(launchUrl, `${safeFileToken(row.displayName ?? row.id)}-${qr.publicRef}`);
+      toast.success('QR downloaded');
+    } catch {
+      toast.error('Could not download QR');
+    }
+  }
+
+  function handleOpenLaunch(row: StaffRow) {
+    const qr = staffQrMap.get(row.id) ?? null;
+    const launchPack = qr ? launchPacks[qr.id] ?? null : null;
+    const launchUrl = launchPack ? buildLaunchPageUrl(origin, launchPack) : null;
+    if (!launchUrl) {
+      toast.error('Refresh this QR first to load the launch page');
+      return;
+    }
+    window.open(launchUrl, '_blank', 'noopener,noreferrer');
+  }
+
   return (
     <div className="space-y-8 md:space-y-10">
       <SectionHeader
         eyebrow="Operations"
         title="Staff and providers"
-        description="Create, manage, and link your service team."
+        description="Create staff, link providers, and manage QR cards."
         action={
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="outline" size="sm">
@@ -258,8 +380,8 @@ export default function StaffIndexPage() {
             <CardHeader className="border-b border-smoke-400/[0.06] pb-5">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                 <div>
-                  <CardTitle className="text-lg">Team roster</CardTitle>
-                  <p className="mt-2 text-[13px] text-smoke-200">Search and open any staff record.</p>
+                  <CardTitle className="text-lg">Team QR roster</CardTitle>
+                  <p className="mt-2 text-[13px] text-smoke-200">Create, refresh, and view staff QR cards in one grid.</p>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
@@ -293,58 +415,107 @@ export default function StaffIndexPage() {
               {loading ? (
                 <p className="text-sm text-smoke-200">Loading roster…</p>
               ) : filteredRows.length ? (
-                <Table>
-                  <thead>
-                    <tr>
-                      <Th>Staff</Th>
-                      <Th>Status</Th>
-                      <Th>Scope</Th>
-                      <Th>Contact</Th>
-                      <Th>Handle</Th>
-                      <Th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredRows.map((row) => {
-                      const branchLabel = row.branchId
-                        ? branchNameById.get(row.branchId) ?? row.branchId.slice(0, 8)
-                        : 'Tenant-wide';
-                      const qrHref = `/dashboard/qr?type=STAFF_QR&staffId=${encodeURIComponent(row.id)}&scope=${row.branchId ? 'branch' : 'tenant'}`;
-                      return (
-                        <tr key={row.id}>
-                          <Td>
-                            <div className="space-y-1">
-                              <div className="font-medium text-smoke-400">{row.displayName ?? row.id.slice(0, 8)}</div>
-                              <div className="text-xs font-medium uppercase tracking-wide text-smoke-200">
-                                {(row.roleInTenant ?? 'SERVICE_STAFF').replace(/_/g, ' ')}
-                              </div>
-                            </div>
-                          </Td>
-                          <Td>{row.status ? <StatusChip status={row.status} /> : '—'}</Td>
-                          <Td className="text-sm text-smoke-200">{branchLabel}</Td>
-                          <Td className="text-xs text-smoke-200">
-                            {row.email ? <div>{row.email}</div> : null}
-                            {row.phone ? <div>{row.phone}</div> : null}
-                            {!row.email && !row.phone ? 'No contact yet' : null}
-                          </Td>
-                          <Td className="font-mono text-xs text-smoke-300">
-                            {row.publicHandle ? `@${row.publicHandle}` : '—'}
-                          </Td>
-                          <Td className="text-right">
-                            <div className="flex flex-wrap justify-end gap-2">
-                              <Button asChild variant="outline" size="sm">
-                                <Link href={qrHref}>Generate QR</Link>
-                              </Button>
-                              <Button asChild size="sm">
-                                <Link href={`/dashboard/staff/${encodeURIComponent(row.id)}`}>Open</Link>
-                              </Button>
-                            </div>
-                          </Td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </Table>
+                <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
+                  {filteredRows.map((row) => {
+                    const branchLabel = row.branchId
+                      ? branchNameById.get(row.branchId) ?? row.branchId.slice(0, 8)
+                      : 'Tenant-wide';
+                    const qr = staffQrMap.get(row.id) ?? null;
+                    const launchPack = qr ? launchPacks[qr.id] ?? null : null;
+                    const launchPageUrl = launchPack ? buildLaunchPageUrl(origin, launchPack) : null;
+                    const launchLink = launchPack?.customerLaunch?.prefillText
+                      ? whatsappDeepLink(launchPack.customerLaunch.prefillText)
+                      : null;
+                    const identityLabel =
+                      row.providerRegistryCode ?? (row.publicHandle ? `@${row.publicHandle}` : row.email ?? 'No public code yet');
+
+                    return (
+                      <EntityQrCard
+                        key={row.id}
+                        tone="staff"
+                        variant="compact"
+                        title={row.displayName ?? row.id.slice(0, 8)}
+                        subtitle={`${humanizeRole(row.roleInTenant)} · ${branchLabel}`}
+                        code={identityLabel}
+                        qrLabel={qr ? qr.publicRef : 'No QR issued'}
+                        qrValue={launchPageUrl}
+                        previewReady={Boolean(launchPageUrl)}
+                        previewHint={
+                          launchPageUrl
+                            ? 'Scan to launch the WhatsApp flow for this staff member.'
+                            : 'Generate or refresh this QR to load its launch preview here.'
+                        }
+                        statusLabel={row.status === 'ACTIVE' ? 'Active' : (row.status ?? 'Draft')}
+                        metrics={[
+                          {
+                            label: 'Scans',
+                            value: String(qr?.scanCount ?? 0),
+                            hint: qr?.lastScannedAt ? new Date(qr.lastScannedAt).toLocaleDateString() : 'No scans yet',
+                          },
+                          {
+                            label: 'Scope',
+                            value: row.branchId ? 'Branch' : 'Tenant',
+                            hint: branchLabel,
+                          },
+                          {
+                            label: 'Contact',
+                            value: row.phone ?? row.email ?? 'Pending',
+                            hint: row.publicHandle ? `@${row.publicHandle}` : 'No handle yet',
+                          },
+                        ]}
+                        actions={[
+                          {
+                            key: 'generate',
+                            label: qr ? 'Refresh QR' : 'Generate QR',
+                            icon: qr ? 'fluent-color:arrow-sync-circle-24' : 'fluent-color:qr-code-24',
+                            onClick: () => void handleQrMutation(row),
+                            disabled: qrPendingId === row.id,
+                            variant: 'primary',
+                          },
+                          {
+                            key: 'download',
+                            label: 'Download',
+                            icon: 'fluent-color:arrow-download-24',
+                            onClick: () => void handleDownloadQr(row),
+                            disabled: !launchPageUrl || qrPendingId === row.id,
+                            variant: 'outline',
+                          },
+                          {
+                            key: 'copy',
+                            label: 'Copy text',
+                            icon: 'fluent-color:document-one-page-copy-24',
+                            onClick: () => void handleCopyLaunch(row),
+                            disabled: !launchPack?.customerLaunch?.prefillText || qrPendingId === row.id,
+                            variant: 'ghost',
+                          },
+                          launchLink
+                            ? {
+                                key: 'open',
+                                label: 'Open launch',
+                                icon: 'fluent-color:open-24',
+                                onClick: () => handleOpenLaunch(row),
+                                disabled: qrPendingId === row.id,
+                                variant: 'ghost',
+                              }
+                            : {
+                                key: 'desk',
+                                label: 'QR desk',
+                                icon: 'fluent-color:panel-left-contract-20',
+                                href: `/dashboard/qr?type=STAFF_QR&staffId=${encodeURIComponent(row.id)}&scope=${row.branchId ? 'branch' : 'tenant'}`,
+                                variant: 'ghost',
+                              },
+                          {
+                            key: 'profile',
+                            label: 'Open profile',
+                            icon: 'fluent-color:person-info-20',
+                            href: `/dashboard/staff/${encodeURIComponent(row.id)}`,
+                            variant: 'ghost',
+                          },
+                        ]}
+                      />
+                    );
+                  })}
+                </div>
               ) : (
                 <EmptyState
                   icon="ph:users-three-duotone"

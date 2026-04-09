@@ -19,6 +19,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import type { AuthUser } from '../auth/types/request-user.type';
+import { CreateSelfServeTenantDto } from './dto/create-self-serve-tenant.dto';
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { PatchTenantCategoryDto } from './dto/patch-tenant-category.dto';
 import { UpsertTenantLandingDto } from './dto/upsert-tenant-landing.dto';
@@ -48,6 +49,13 @@ export class TenantsController {
   @ApiOperation({ summary: 'Create tenant (SUPER_ADMIN)' })
   create(@Body() body: CreateTenantDto, @CurrentUser() user: AuthUser, @Req() req: Request) {
     return this.tenants.create(user, body, tenantMeta(req));
+  }
+
+  @Post('self-serve')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Create a trial tenant + first branch for the authenticated business owner' })
+  createSelfServe(@Body() body: CreateSelfServeTenantDto, @CurrentUser() user: AuthUser, @Req() req: Request) {
+    return this.tenants.createSelfServe(user, body, tenantMeta(req));
   }
 
   @Get()

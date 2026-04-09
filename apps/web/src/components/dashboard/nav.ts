@@ -35,6 +35,7 @@ const NAV_ITEMS: NavItem[] = [
     icon: 'fluent-color:person-starburst-48',
     categories: ['BEAUTY_GROOMING'],
   },
+  { section: 'Money & trust', href: '/dashboard/payroll', label: 'Payroll', icon: 'fluent-color:wallet-credit-card-16' },
   { section: 'Money & trust', href: '/dashboard/payments', label: 'Payments', icon: 'fluent-color:coin-multiple-48' },
   { section: 'Money & trust', href: '/dashboard/analytics', label: 'Analytics', icon: 'fluent-color:data-trending-48' },
   { section: 'Money & trust', href: '/dashboard/statements', label: 'Statements', icon: 'fluent-color:contact-card-48' },

@@ -5,12 +5,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { Prisma } from '@prisma/client';
 import type { BusinessCategory, Tenant } from '@prisma/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { AuditService } from '../audit-logs/audit.service';
 import type { AuthUser } from '../auth/types/request-user.type';
 import { userIsSuperAdmin } from '../auth/types/request-user.type';
+import type { CreateSelfServeTenantDto } from './dto/create-self-serve-tenant.dto';
 import type { CreateTenantDto } from './dto/create-tenant.dto';
 import type { PatchTenantCategoryDto } from './dto/patch-tenant-category.dto';
 import type { UpsertTenantLandingDto } from './dto/upsert-tenant-landing.dto';
@@ -83,6 +85,65 @@ export class TenantsService {
       publishedAt: p.publishedAt,
       updatedAt: p.updatedAt,
     };
+  }
+
+  private mapBranchSummary(b: {
+    id: string;
+    tenantId: string;
+    name: string;
+    code: string;
+    address: string | null;
+    city: string | null;
+    country: string | null;
+    phone: string | null;
+    email: string | null;
+    timezone: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    return {
+      id: b.id,
+      tenantId: b.tenantId,
+      name: b.name,
+      code: b.code,
+      address: b.address,
+      city: b.city,
+      country: b.country,
+      phone: b.phone,
+      email: b.email,
+      timezone: b.timezone,
+      createdAt: b.createdAt,
+      updatedAt: b.updatedAt,
+    };
+  }
+
+  private slugify(raw: string): string {
+    const normalized = raw
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, ' ')
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    return normalized.slice(0, 80) || 'workspace';
+  }
+
+  private async nextAvailableSlug(seed: string): Promise<string> {
+    const base = this.slugify(seed);
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      const suffix = attempt === 0 ? '' : `-${randomBytes(2).toString('hex')}`;
+      const candidate = `${base.slice(0, Math.max(2, 80 - suffix.length))}${suffix}`;
+      const taken = await this.prisma.tenant.findFirst({
+        where: { slug: candidate, deletedAt: null },
+        select: { id: true },
+      });
+      if (!taken) {
+        return candidate;
+      }
+    }
+    return `workspace-${randomBytes(3).toString('hex')}`;
   }
 
   async create(actor: AuthUser, dto: CreateTenantDto, meta: TenantRequestMeta) {
@@ -159,6 +220,148 @@ export class TenantsService {
     });
 
     return this.mapTenant(tenant);
+  }
+
+  async createSelfServe(actor: AuthUser, dto: CreateSelfServeTenantDto, meta: TenantRequestMeta) {
+    const displayName = dto.brandName?.trim() || dto.name.trim();
+    const legalName = dto.brandName?.trim() ? dto.name.trim() : undefined;
+    const slug = await this.nextAvailableSlug(displayName);
+    const branchAddress = dto.branch.address?.trim() || dto.address?.trim() || undefined;
+    const branchCity = dto.branch.city?.trim() || dto.city?.trim() || undefined;
+    const branchCountry = dto.branch.country?.trim() || dto.country?.trim() || undefined;
+    const branchPhone = dto.branch.phone?.trim() || dto.phone?.trim() || undefined;
+    const branchEmail = dto.branch.email?.trim().toLowerCase() || dto.businessEmail?.trim().toLowerCase() || undefined;
+    const branchTimezone = dto.branch.timezone?.trim() || undefined;
+    const categorySettings = {
+      subtype: dto.subtype?.trim() || null,
+      source: 'SELF_SERVE_ONBOARDING',
+      requestedAt: new Date().toISOString(),
+    } satisfies Record<string, unknown>;
+
+    const submittedAt = new Date().toISOString();
+
+    const onboardingMeta = {
+      source: 'SELF_SERVE_ONBOARDING',
+      createdByUserId: actor.userId,
+      submittedAt,
+      requestedCategory: dto.category,
+      requestedSubtype: dto.subtype?.trim() || null,
+      businessAddress: dto.address?.trim() || null,
+      city: dto.city?.trim() || null,
+      country: dto.country?.trim() || null,
+      approval: {
+        workflowStatus: 'PENDING',
+        riskLevel: 'MEDIUM',
+        requestedAt: submittedAt,
+        submittedAt,
+        reviewNotes: null,
+        nextActions: 'Verify business profile, branch readiness, and payment configuration before activation.',
+        checklist: {
+          legalIdentityVerified: false,
+          contactVerified: false,
+          paymentReady: false,
+          branchReady: false,
+          catalogReady: false,
+          staffingReady: false,
+          channelReady: false,
+        },
+        timeline: [],
+      },
+    } satisfies Record<string, unknown>;
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenant.create({
+        data: {
+          name: displayName,
+          slug,
+          status: 'TRIAL',
+          legalName,
+          email: dto.businessEmail?.trim().toLowerCase(),
+          phone: dto.phone?.trim(),
+          metadata: onboardingMeta as Prisma.InputJsonValue,
+        },
+      });
+
+      await tx.tenantCategory.create({
+        data: {
+          tenantId: tenant.id,
+          category: dto.category,
+          enabled: true,
+          settings: categorySettings as Prisma.InputJsonValue,
+        },
+      });
+
+      this.access.assertRoleAssignmentShape('TENANT_OWNER', tenant.id, undefined);
+      await tx.userRoleAssignment.create({
+        data: {
+          userId: actor.userId,
+          role: 'TENANT_OWNER',
+          tenantId: tenant.id,
+        },
+      });
+
+      const branch = await tx.branch.create({
+        data: {
+          tenantId: tenant.id,
+          name: dto.branch.name.trim(),
+          code: dto.branch.code.trim().toUpperCase(),
+          address: branchAddress,
+          city: branchCity,
+          country: branchCountry,
+          phone: branchPhone,
+          email: branchEmail,
+          timezone: branchTimezone,
+        },
+      });
+
+      const fullTenant = await tx.tenant.findUniqueOrThrow({
+        where: { id: tenant.id },
+        include: { categories: true },
+      });
+
+      return { tenant: fullTenant, branch };
+    });
+
+    await this.audit.write({
+      action: 'CREATE',
+      entityType: 'Tenant',
+      entityId: created.tenant.id,
+      tenantId: created.tenant.id,
+      actorUserId: actor.userId,
+      correlationId: meta.correlationId,
+      summary: `Self-serve tenant created: ${created.tenant.name}`,
+      details: {
+        slug: created.tenant.slug,
+        category: dto.category,
+        branchId: created.branch.id,
+        branchCode: created.branch.code,
+      },
+      ipAddress: meta.ipAddress,
+      userAgent: meta.userAgent,
+    });
+
+    await this.audit.write({
+      action: 'CREATE',
+      entityType: 'Branch',
+      entityId: created.branch.id,
+      tenantId: created.tenant.id,
+      branchId: created.branch.id,
+      actorUserId: actor.userId,
+      correlationId: meta.correlationId,
+      summary: `First branch created: ${created.branch.name}`,
+      details: { code: created.branch.code },
+      ipAddress: meta.ipAddress,
+      userAgent: meta.userAgent,
+    });
+
+    return {
+      tenant: this.mapTenant(created.tenant),
+      branch: this.mapBranchSummary(created.branch),
+      access: {
+        role: 'TENANT_OWNER',
+        tenantStatus: created.tenant.status,
+      },
+    };
   }
 
   async findAll(actor: AuthUser) {

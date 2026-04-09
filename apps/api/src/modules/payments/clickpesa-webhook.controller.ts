@@ -1,15 +1,16 @@
-import { Body, Controller, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Headers, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../../common/decorators/public.decorator';
-import { PaymentsService } from './payments.service';
+import { PaymentsJobsService } from './payments-jobs.service';
 
 @ApiTags('payments-webhooks')
 @Controller('payments/webhooks')
 export class ClickPesaWebhookController {
-  constructor(private readonly payments: PaymentsService) {}
+  constructor(private readonly jobs: PaymentsJobsService) {}
 
   @Public()
   @Post('clickpesa/:tenantId')
+  @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'ClickPesa webhook (verify x-tiptap-webhook-secret when configured)',
   })
@@ -36,7 +37,7 @@ export class ClickPesaWebhookController {
         : typeof body.externalTransactionId === 'string'
           ? body.externalTransactionId
           : null;
-    return this.payments.applyExternalPaymentUpdate({
+    return this.jobs.enqueueWebhookUpdateValidated({
       tenantId,
       orderReference,
       providerStatus: status,

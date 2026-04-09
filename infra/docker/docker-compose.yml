@@ -52,6 +52,9 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_refresh_secret_change_in_prod_1}
       # Required to encrypt ClickPesa (and other) keys at rest — without it, saving payment config returns an error
       PAYMENTS_CREDENTIALS_SECRET: ${PAYMENTS_CREDENTIALS_SECRET:-dev_payments_credentials_secret_change_in_prod_min_32_chars}
+      INTERNAL_SERVICES_KEY: ${INTERNAL_SERVICES_KEY:-tiptap_internal_dev_key}
+      BOT_GATEWAY_BASE_URL: http://bot-gateway:3002
+      BOT_GATEWAY_ADMIN_KEY: ${BOT_GATEWAY_ADMIN_KEY:-TIPTAP_multiple_food_and_saloon}
       SWAGGER_ENABLED: 'true'
       SWAGGER_PATH: docs
       # Browser calls API on host machine (not the internal Docker hostname)
@@ -59,6 +62,52 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: tiptap-worker:local
+    build:
+      context: ../..
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      NODE_ENV: production
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      API_INTERNAL_BASE_URL: http://api:3000/api/v1
+      INTERNAL_SERVICES_KEY: ${INTERNAL_SERVICES_KEY:-tiptap_internal_dev_key}
+      PAYMENTS_WORKER_CONCURRENCY: 6
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  bot-gateway:
+    image: tiptap-bot-gateway:local
+    build:
+      context: ../..
+      dockerfile: apps/bot-gateway/Dockerfile
+    ports:
+      - '3002:3002'
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      # Local Docker defaults to enabled so the bot can be paired from logs immediately.
+      WHATSAPP_ENABLED: ${WHATSAPP_ENABLED:-true}
+      WHATSAPP_AUTH_DIR: /workspace/apps/bot-gateway/.wa-auth
+      WHATSAPP_DEFAULT_LANGUAGE: sw
+      WHATSAPP_SESSION_TTL_MS: 86400000
+      WHATSAPP_REDIS_PREFIX: tiptap:whatsapp
+      API_BASE_URL: http://api:3000/api/v1
+      BOT_GATEWAY_ADMIN_KEY: ${BOT_GATEWAY_ADMIN_KEY:-TIPTAP_multiple_food_and_saloon}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - whatsapp_auth:/workspace/apps/bot-gateway/.wa-auth
+    depends_on:
+      api:
+        condition: service_started
       redis:
         condition: service_healthy
 
@@ -95,3 +144,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  whatsapp_auth:

@@ -95,6 +95,50 @@ enum StaffCompensationStatus {
   VOID
 }
 
+enum PayrollLineKind {
+  BASIC_SALARY
+  ALLOWANCE
+  COMMISSION
+  BONUS
+  TIP_SHARE
+  OVERTIME
+  SERVICE_CHARGE_SHARE
+  ADJUSTMENT
+  ADVANCE_RECOVERY
+  DEDUCTION
+}
+
+enum PayrollRunStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  PAID
+  RECONCILED
+  VOID
+}
+
+enum PayrollSlipStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  PAID
+  RECONCILED
+  VOID
+}
+
+enum PayrollDisbursementMethod {
+  CASH
+  BANK_TRANSFER
+  MOBILE_MONEY
+  MANUAL_OTHER
+}
+
+enum PayrollDisbursementStatus {
+  PENDING
+  RECORDED
+  FAILED
+}
+
 /// Aligned with bill + assistance operational flow: PENDING → ACKNOWLEDGED → RESOLVED (or CANCELLED).
 enum WaiterCallStatus {
   PENDING
@@ -325,6 +369,8 @@ model Tenant {
   beautyStations   BeautyStation[]
   assistanceReqs   AssistanceRequest[]
   staffCompensations StaffCompensation[]
+  payrollRuns      PayrollRun[]
+  payrollSlips     PayrollSlip[]
   diningOrders     DiningOrder[]
   beautyBookings   BeautyBooking[]
   kdsTokens        KdsToken[]
@@ -398,6 +444,8 @@ model Branch {
   assistanceReqs   AssistanceRequest[]
   paymentTxns      PaymentTransaction[]
   staffCompensations StaffCompensation[]
+  payrollRuns      PayrollRun[]
+  payrollSlips     PayrollSlip[]
   diningOrders     DiningOrder[]
   beautyBookings   BeautyBooking[]
   kdsTokens        KdsToken[]
@@ -470,6 +518,8 @@ model ProviderProfile {
   internalNotes      String?  @db.Text
   /// Public skill tags (JSON array of strings); safe for /public endpoint.
   skills             Json?
+  /// Internal payout preference (masked destination only), safe for private/provider payroll workflows.
+  payoutProfile      Json?
 
   user  User?   @relation("ProviderProfileOwner", fields: [userId], references: [id], onDelete: SetNull)
   staff Staff[]
@@ -505,6 +555,7 @@ model Staff {
   ratings              Rating[]
   tips                 Tip[]
   compensations        StaffCompensation[]
+  payrollSlips         PayrollSlip[]
   conversationSessions ConversationSession[]
   waiterCallTargets    WaiterCallRequest[]
   assistanceRequests   AssistanceRequest[]
@@ -545,6 +596,9 @@ model StaffCompensation {
   staffId       String
   type          StaffCompensationType   @default(SALARY)
   status        StaffCompensationStatus @default(SCHEDULED)
+  lineKind      PayrollLineKind?
+  label         String?
+  sourceReference String?
   amountCents   Int
   currency      String                  @default("TZS")
   periodLabel   String?
@@ -553,6 +607,9 @@ model StaffCompensation {
   effectiveDate DateTime                @default(now())
   paidAt        DateTime?
   notes         String?                 @db.Text
+  payrollRunId  String?
+  payrollSlipId String?
+  lockedAt      DateTime?
   createdByUserId String?
   createdAt     DateTime                @default(now())
   updatedAt     DateTime                @updatedAt
@@ -560,12 +617,119 @@ model StaffCompensation {
   tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   branch Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
   staff  Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  payrollRun  PayrollRun? @relation(fields: [payrollRunId], references: [id], onDelete: SetNull)
+  payrollSlip PayrollSlip? @relation(fields: [payrollSlipId], references: [id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([branchId])
   @@index([staffId])
   @@index([staffId, status])
   @@index([effectiveDate])
+  @@index([payrollRunId])
+  @@index([payrollSlipId])
+  @@index([lineKind])
+}
+
+model PayrollRun {
+  id               String           @id @default(cuid())
+  tenantId         String
+  branchId         String?
+  status           PayrollRunStatus @default(SUBMITTED)
+  currency         String           @default("TZS")
+  periodLabel      String
+  periodStart      DateTime
+  periodEnd        DateTime
+  notes            String?          @db.Text
+  createdByUserId  String?
+  approvedByUserId String?
+  approvedAt       DateTime?
+  paidAt           DateTime?
+  reconciledAt     DateTime?
+  voidedAt         DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  slips PayrollSlip[]
+  compensationRows StaffCompensation[]
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([status])
+  @@index([periodStart, periodEnd])
+}
+
+model PayrollSlip {
+  id                     String            @id @default(cuid())
+  tenantId               String
+  branchId               String?
+  staffId                String
+  payrollRunId           String?
+  slipNumber             String            @unique
+  status                 PayrollSlipStatus @default(SUBMITTED)
+  currency               String            @default("TZS")
+  periodLabel            String
+  periodStart            DateTime
+  periodEnd              DateTime
+  effectiveDate          DateTime          @default(now())
+  grossCents             Int               @default(0)
+  deductionCents         Int               @default(0)
+  netCents               Int               @default(0)
+  baseSalaryCents        Int               @default(0)
+  allowanceCents         Int               @default(0)
+  commissionCents        Int               @default(0)
+  bonusCents             Int               @default(0)
+  tipShareCents          Int               @default(0)
+  overtimeCents          Int               @default(0)
+  serviceChargeCents     Int               @default(0)
+  adjustmentCents        Int               @default(0)
+  advanceRecoveryCents   Int               @default(0)
+  otherDeductionCents    Int               @default(0)
+  paidAt                 DateTime?
+  notes                  String?           @db.Text
+  createdByUserId        String?
+  approvedByUserId       String?
+  approvedAt             DateTime?
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  staff  Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  payrollRun PayrollRun? @relation(fields: [payrollRunId], references: [id], onDelete: SetNull)
+  compensationRows StaffCompensation[]
+  disbursements PayrollDisbursement[]
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([staffId])
+  @@index([payrollRunId])
+  @@index([status])
+}
+
+model PayrollDisbursement {
+  id                    String                    @id @default(cuid())
+  payrollSlipId         String
+  method                PayrollDisbursementMethod
+  status                PayrollDisbursementStatus @default(RECORDED)
+  amountCents           Int
+  reference             String?
+  accountMask           String?
+  recipientLabel        String?
+  proofNote             String?                   @db.Text
+  externalTransactionId String?
+  metadata              Json?
+  recordedByUserId      String?
+  recordedAt            DateTime                  @default(now())
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+
+  payrollSlip PayrollSlip @relation(fields: [payrollSlipId], references: [id], onDelete: Cascade)
+
+  @@index([payrollSlipId])
+  @@index([status])
+  @@index([recordedAt])
 }
 
 model QrCode {

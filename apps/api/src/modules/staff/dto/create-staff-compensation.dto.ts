@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { StaffCompensationStatus, StaffCompensationType } from '@prisma/client';
+import { PayrollLineKind, StaffCompensationStatus, StaffCompensationType } from '@prisma/client';
 import { IsDateString, IsEnum, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
 
 export class CreateStaffCompensationDto {
@@ -18,6 +18,23 @@ export class CreateStaffCompensationDto {
   @IsOptional()
   @IsEnum(StaffCompensationStatus)
   status?: StaffCompensationStatus;
+
+  @ApiPropertyOptional({ enum: PayrollLineKind })
+  @IsOptional()
+  @IsEnum(PayrollLineKind)
+  lineKind?: PayrollLineKind;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  label?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  sourceReference?: string;
 
   @ApiProperty({ description: 'Amount in minor units' })
   @IsInt()

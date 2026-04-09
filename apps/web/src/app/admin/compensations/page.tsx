@@ -18,12 +18,27 @@ import { adminListCompensations, type AdminCompensationRow } from '@/lib/api/adm
 import { ApiError } from '@/lib/api/client';
 import { downloadCsv } from '@/lib/csv-download';
 import { formatMinorUnits } from '@/lib/format';
+import type { PayrollLineKind } from '@/lib/api/staff';
 import { listBranchesForTenant, listTenants } from '@/lib/api/tenants-branches';
 import { getStoredToken } from '@/lib/auth/storage';
+import { payrollLineLabel } from '@/lib/payroll';
 import { toast } from '@/lib/toast';
 
 const STATUSES = ['', 'SCHEDULED', 'APPROVED', 'PAID', 'VOID'] as const;
 const TYPES = ['', 'SALARY', 'BONUS', 'COMMISSION', 'ADVANCE', 'DEDUCTION'] as const;
+const LINE_KINDS = [
+  '',
+  'BASIC_SALARY',
+  'ALLOWANCE',
+  'COMMISSION',
+  'BONUS',
+  'TIP_SHARE',
+  'OVERTIME',
+  'SERVICE_CHARGE_SHARE',
+  'ADJUSTMENT',
+  'ADVANCE_RECOVERY',
+  'DEDUCTION',
+] as const;
 
 export default function AdminCompensationsPage() {
   const [loading, setLoading] = useState(true);
@@ -37,6 +52,7 @@ export default function AdminCompensationsPage() {
   const [branchId, setBranchId] = useState('');
   const [status, setStatus] = useState('');
   const [type, setType] = useState('');
+  const [lineKind, setLineKind] = useState('');
   const [tenants, setTenants] = useState<{ id: string; name?: string }[]>([]);
   const [branches, setBranches] = useState<{ id: string; name?: string }[]>([]);
   const [exportingAll, setExportingAll] = useState(false);
@@ -48,7 +64,7 @@ export default function AdminCompensationsPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedQ, tenantId, branchId, status, type]);
+  }, [debouncedQ, tenantId, branchId, status, type, lineKind]);
 
   const loadTenants = useCallback(() => {
     const token = getStoredToken();
@@ -107,6 +123,7 @@ export default function AdminCompensationsPage() {
         branchId: branchId || undefined,
         status: status || undefined,
         type: type || undefined,
+        lineKind: lineKind || undefined,
         q: debouncedQ || undefined,
         page,
         pageSize,
@@ -120,7 +137,7 @@ export default function AdminCompensationsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, debouncedQ, tenantId, branchId, status, type]);
+  }, [page, debouncedQ, tenantId, branchId, status, type, lineKind]);
 
   useEffect(() => {
     void load();
@@ -132,17 +149,37 @@ export default function AdminCompensationsPage() {
     () => rows.filter((r) => r.status === 'SCHEDULED' || r.status === 'APPROVED').reduce((a, b) => a + b.amountCents, 0),
     [rows],
   );
+  const slippedRows = useMemo(() => rows.filter((row) => Boolean(row.payrollSlipId)).length, [rows]);
+  const lockedRows = useMemo(() => rows.filter((row) => Boolean(row.lockedAt)).length, [rows]);
 
   const exportPageCsv = () => {
     downloadCsv(
       `tiptap-compensations-p${page}.csv`,
-      ['Staff', 'Tenant', 'Branch', 'Type', 'Status', 'Amount', 'Currency', 'Period', 'Effective', 'Paid', 'Row id'],
+      [
+        'Staff',
+        'Tenant',
+        'Branch',
+        'Type',
+        'Line kind',
+        'Slip',
+        'Status',
+        'Locked',
+        'Amount',
+        'Currency',
+        'Period',
+        'Effective',
+        'Paid',
+        'Row id',
+      ],
       rows.map((r) => [
         r.staff?.displayName ?? '',
         r.tenant?.name ?? '',
         r.branch?.name ?? '',
         r.type,
+        r.lineKind ?? '',
+        r.payrollSlip?.slipNumber ?? '',
         r.status,
+        r.lockedAt ? 'YES' : 'NO',
         String(r.amountCents / 100),
         r.currency,
         r.periodLabel ?? '',
@@ -165,6 +202,7 @@ export default function AdminCompensationsPage() {
           branchId: branchId || undefined,
           status: status || undefined,
           type: type || undefined,
+          lineKind: lineKind || undefined,
           q: debouncedQ || undefined,
           page: p,
           pageSize: ps,
@@ -172,13 +210,32 @@ export default function AdminCompensationsPage() {
       );
       downloadCsv(
         `tiptap-compensations-all-${all.length}.csv`,
-        ['Staff', 'Tenant', 'Branch', 'Type', 'Status', 'Amount', 'Currency', 'Period', 'Effective', 'Paid', 'Notes', 'Row id'],
+        [
+          'Staff',
+          'Tenant',
+          'Branch',
+          'Type',
+          'Line kind',
+          'Slip',
+          'Status',
+          'Locked',
+          'Amount',
+          'Currency',
+          'Period',
+          'Effective',
+          'Paid',
+          'Notes',
+          'Row id',
+        ],
         all.map((r) => [
           r.staff?.displayName ?? '',
           r.tenant?.name ?? '',
           r.branch?.name ?? '',
           r.type,
+          r.lineKind ?? '',
+          r.payrollSlip?.slipNumber ?? '',
           r.status,
+          r.lockedAt ? 'YES' : 'NO',
           String(r.amountCents / 100),
           r.currency,
           r.periodLabel ?? '',
@@ -231,6 +288,8 @@ export default function AdminCompensationsPage() {
             label="Pending+approved (page)"
             value={formatMinorUnits(pendingCents, rows[0]?.currency ?? 'TZS')}
           />
+          <StatCard icon="fluent-color:receipt-item-24" label="With slip" value={slippedRows} />
+          <StatCard icon="fluent-color:shield-lock-24" label="Locked" value={lockedRows} />
         </div>
       )}
 
@@ -297,6 +356,16 @@ export default function AdminCompensationsPage() {
               </Select>
             </div>
             <div className="space-y-1">
+              <Label htmlFor="co-line-kind">Line</Label>
+              <Select id="co-line-kind" className="h-10 min-w-[12rem]" value={lineKind} onChange={(e) => setLineKind(e.target.value)}>
+                {LINE_KINDS.map((value) => (
+                  <option key={value || 'all'} value={value}>
+                    {value ? payrollLineLabel(value, null) : 'All lines'}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="space-y-1">
               <Label htmlFor="co-q">Search</Label>
               <Input
                 id="co-q"
@@ -330,8 +399,8 @@ export default function AdminCompensationsPage() {
                   <tr>
                     <Th>Staff</Th>
                     <Th>Tenant</Th>
-                    <Th>Branch</Th>
-                    <Th>Type</Th>
+                    <Th>Line</Th>
+                    <Th>Slip</Th>
                     <Th>Status</Th>
                     <Th>Amount</Th>
                     <Th>Period</Th>
@@ -341,10 +410,38 @@ export default function AdminCompensationsPage() {
                 <tbody>
                   {rows.map((r) => (
                     <tr key={r.id}>
-                      <Td className="font-medium text-smoke-400">{r.staff?.displayName ?? '—'}</Td>
-                      <Td className="text-sm">{r.tenant?.name ?? '—'}</Td>
-                      <Td className="text-sm text-smoke-200">{r.branch?.name ?? '—'}</Td>
-                      <Td className="text-xs">{r.type.replaceAll('_', ' ')}</Td>
+                      <Td className="font-medium text-smoke-400">
+                        <div>
+                          <div>{r.staff?.displayName ?? '—'}</div>
+                          <div className="text-xs text-smoke-200">{r.staff?.email ?? r.staffId}</div>
+                        </div>
+                      </Td>
+                      <Td className="text-sm">
+                        <div>
+                          <div>{r.tenant?.name ?? '—'}</div>
+                          <div className="text-xs text-smoke-200">{r.branch?.name ?? 'Tenant-wide'}</div>
+                        </div>
+                      </Td>
+                      <Td className="text-xs">
+                        <div className="space-y-1">
+                          <div className="font-medium text-smoke-400">{payrollLineLabel((r.lineKind as PayrollLineKind | null | undefined) ?? null, r.label ?? null)}</div>
+                          <div className="text-smoke-200">
+                            {r.type.replaceAll('_', ' ')}
+                            {r.sourceReference ? ` · ${r.sourceReference}` : ''}
+                          </div>
+                        </div>
+                      </Td>
+                      <Td className="text-xs text-smoke-200">
+                        {r.payrollSlip ? (
+                          <div className="space-y-1">
+                            <div className="font-medium text-smoke-400">{r.payrollSlip.slipNumber}</div>
+                            <div>{r.payrollSlip.status}</div>
+                            <div>{r.lockedAt ? 'Locked' : 'Unlocked'}</div>
+                          </div>
+                        ) : (
+                          <span>Unslipped</span>
+                        )}
+                      </Td>
                       <Td>
                         <StatusChip status={r.status} />
                       </Td>

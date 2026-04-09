@@ -33,8 +33,16 @@ type ProviderRow = {
   publicRatingCount: number;
   skills: Prisma.JsonValue | null;
   internalNotes: string | null;
+  payoutProfile?: Prisma.JsonValue | null;
   createdAt: Date;
   updatedAt: Date;
+};
+
+type ProviderPayoutProfile = {
+  method: string | null;
+  recipientLabel: string | null;
+  accountMask: string | null;
+  note: string | null;
 };
 
 @Injectable()
@@ -105,6 +113,57 @@ export class ProviderRegistryService {
     return [...new Set(out)];
   }
 
+  private normalizeOptionalText(raw: string | null | undefined): string | null {
+    const value = raw?.trim();
+    return value ? value : null;
+  }
+
+  private parsePayoutProfile(value: Prisma.JsonValue | null | undefined): ProviderPayoutProfile | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const row = value as Record<string, unknown>;
+    const method = typeof row.method === 'string' && row.method.trim() ? row.method.trim() : null;
+    const recipientLabel =
+      typeof row.recipientLabel === 'string' && row.recipientLabel.trim() ? row.recipientLabel.trim() : null;
+    const accountMask =
+      typeof row.accountMask === 'string' && row.accountMask.trim() ? row.accountMask.trim() : null;
+    const note = typeof row.note === 'string' && row.note.trim() ? row.note.trim() : null;
+    if (!method && !recipientLabel && !accountMask && !note) {
+      return null;
+    }
+    return { method, recipientLabel, accountMask, note };
+  }
+
+  private normalizePayoutProfile(input: {
+    payoutMethod?: string | null;
+    payoutRecipientLabel?: string | null;
+    payoutAccountMask?: string | null;
+    payoutNote?: string | null;
+  }): Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined {
+    const anyProvided =
+      input.payoutMethod !== undefined ||
+      input.payoutRecipientLabel !== undefined ||
+      input.payoutAccountMask !== undefined ||
+      input.payoutNote !== undefined;
+    if (!anyProvided) {
+      return undefined;
+    }
+    const method = this.normalizeOptionalText(input.payoutMethod);
+    const recipientLabel = this.normalizeOptionalText(input.payoutRecipientLabel);
+    const accountMask = this.normalizeOptionalText(input.payoutAccountMask);
+    const note = this.normalizeOptionalText(input.payoutNote);
+    if (!method && !recipientLabel && !accountMask && !note) {
+      return Prisma.JsonNull;
+    }
+    return {
+      method,
+      recipientLabel,
+      accountMask,
+      note,
+    } satisfies Prisma.InputJsonObject;
+  }
+
   private async ensureSlugAvailable(slug: string | undefined, exceptId?: string): Promise<void> {
     if (!slug) {
       return;
@@ -147,7 +206,7 @@ export class ProviderRegistryService {
       where: { id: profile.id },
       data: { registryCode: await this.ensureRegistryCode() },
     });
-    return updated;
+    return updated as unknown as ProviderRow;
   }
 
   private mapPublic(p: ProviderRow) {
@@ -173,6 +232,7 @@ export class ProviderRegistryService {
       ...this.mapPublic(p),
       publicSlug: p.publicSlug,
       internalNotes: p.internalNotes,
+      payoutProfile: this.parsePayoutProfile(p.payoutProfile),
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
     };
@@ -282,17 +342,22 @@ export class ProviderRegistryService {
     const slug = this.normalizeSlug(dto.publicSlug);
     await this.ensureSlugAvailable(slug);
     const skills = this.normalizeSkills(dto.skills);
+    const payoutProfile = this.normalizePayoutProfile(dto);
+    const data = {
+      displayName: dto.displayName.trim(),
+      headline: dto.headline?.trim(),
+      bio: dto.bio?.trim(),
+      verifiedSummary: dto.verifiedSummary?.trim(),
+      publicSlug: slug,
+      registryCode: await this.ensureRegistryCode(),
+      skills: skills.length ? skills : Prisma.JsonNull,
+      internalNotes: dto.internalNotes?.trim(),
+    } as Prisma.ProviderProfileCreateInput;
+    if (payoutProfile !== undefined) {
+      (data as Record<string, unknown>).payoutProfile = payoutProfile;
+    }
     const p = await this.prisma.providerProfile.create({
-      data: {
-        displayName: dto.displayName.trim(),
-        headline: dto.headline?.trim(),
-        bio: dto.bio?.trim(),
-        verifiedSummary: dto.verifiedSummary?.trim(),
-        publicSlug: slug,
-        registryCode: await this.ensureRegistryCode(),
-        skills: skills.length ? skills : Prisma.JsonNull,
-        internalNotes: dto.internalNotes?.trim(),
-      },
+      data,
     });
 
     await this.audit.write({
@@ -316,6 +381,7 @@ export class ProviderRegistryService {
     const slug = this.normalizeSlug(dto.publicSlug);
     await this.ensureSlugAvailable(slug, existing?.id);
     const skills = this.normalizeSkills(dto.skills);
+    const payoutProfile = this.normalizePayoutProfile(dto);
 
     const displayName = dto.displayName?.trim();
     if (!existing && !displayName) {
@@ -336,7 +402,8 @@ export class ProviderRegistryService {
           publicSlug: slug,
           registryCode: await this.ensureRegistryCode(),
           skills: skills.length ? skills : Prisma.JsonNull,
-        },
+          ...(payoutProfile !== undefined ? ({ payoutProfile } as Record<string, unknown>) : {}),
+        } as Prisma.ProviderProfileCreateInput,
       });
       await this.audit.write({
         action: 'CREATE',
@@ -361,7 +428,8 @@ export class ProviderRegistryService {
           publicSlug: slug,
           registryCode: await this.ensureRegistryCode(),
           skills: skills.length ? skills : Prisma.JsonNull,
-        },
+          ...(payoutProfile !== undefined ? ({ payoutProfile } as Record<string, unknown>) : {}),
+        } as Prisma.ProviderProfileCreateInput,
       });
       await this.audit.write({
         action: 'CREATE',
@@ -376,15 +444,19 @@ export class ProviderRegistryService {
       return this.mapInternal(created);
     }
 
+    const updateData = {
+      displayName: displayName ?? undefined,
+      headline: dto.headline === undefined ? undefined : dto.headline?.trim(),
+      bio: dto.bio === undefined ? undefined : dto.bio?.trim(),
+      publicSlug: dto.publicSlug === undefined ? undefined : (slug ?? null),
+      skills: dto.skills === undefined ? undefined : skills.length ? skills : Prisma.JsonNull,
+    } as Prisma.ProviderProfileUpdateInput;
+    if (payoutProfile !== undefined) {
+      (updateData as Record<string, unknown>).payoutProfile = payoutProfile;
+    }
     const updated = await this.prisma.providerProfile.update({
       where: { id: existing.id },
-      data: {
-        displayName: displayName ?? undefined,
-        headline: dto.headline === undefined ? undefined : dto.headline?.trim(),
-        bio: dto.bio === undefined ? undefined : dto.bio?.trim(),
-        publicSlug: dto.publicSlug === undefined ? undefined : (slug ?? null),
-        skills: dto.skills === undefined ? undefined : skills.length ? skills : Prisma.JsonNull,
-      },
+      data: updateData,
     });
 
     await this.audit.write({
@@ -479,20 +551,25 @@ export class ProviderRegistryService {
     const slug = dto.publicSlug === undefined ? undefined : this.normalizeSlug(dto.publicSlug);
     await this.ensureSlugAvailable(slug, id);
     const skills = dto.skills === undefined ? undefined : this.normalizeSkills(dto.skills);
+    const payoutProfile = this.normalizePayoutProfile(dto);
 
+    const updateData = {
+      displayName: dto.displayName?.trim(),
+      headline: dto.headline === undefined ? undefined : dto.headline?.trim(),
+      bio: dto.bio === undefined ? undefined : dto.bio?.trim(),
+      verifiedSummary:
+        dto.verifiedSummary === undefined ? undefined : dto.verifiedSummary?.trim(),
+      publicSlug: dto.publicSlug === undefined ? undefined : (slug ?? null),
+      skills: dto.skills === undefined ? undefined : skills?.length ? skills : Prisma.JsonNull,
+      internalNotes:
+        dto.internalNotes === undefined ? undefined : dto.internalNotes?.trim(),
+    } as Prisma.ProviderProfileUpdateInput;
+    if (payoutProfile !== undefined) {
+      (updateData as Record<string, unknown>).payoutProfile = payoutProfile;
+    }
     const updated = await this.prisma.providerProfile.update({
       where: { id },
-      data: {
-        displayName: dto.displayName?.trim(),
-        headline: dto.headline === undefined ? undefined : dto.headline?.trim(),
-        bio: dto.bio === undefined ? undefined : dto.bio?.trim(),
-        verifiedSummary:
-          dto.verifiedSummary === undefined ? undefined : dto.verifiedSummary?.trim(),
-        publicSlug: dto.publicSlug === undefined ? undefined : (slug ?? null),
-        skills: dto.skills === undefined ? undefined : skills?.length ? skills : Prisma.JsonNull,
-        internalNotes:
-          dto.internalNotes === undefined ? undefined : dto.internalNotes?.trim(),
-      },
+      data: updateData,
     });
     const p = await this.withRegistryCode(updated);
 

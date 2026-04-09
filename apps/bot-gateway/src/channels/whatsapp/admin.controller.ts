@@ -22,8 +22,9 @@ export class BotGatewayAdminController {
 
   @Get('status')
   @HttpCode(HttpStatus.OK)
-  status() {
-    return { ok: true, service: 'bot-gateway', channel: 'whatsapp' };
+  status(@Req() req: any) {
+    this.assertAdminKey(req);
+    return this.whatsapp.getAdminStatus();
   }
 
   @Post('test-message')
@@ -44,4 +45,3 @@ export class BotGatewayAdminController {
     return { ok: true };
   }
 }
-

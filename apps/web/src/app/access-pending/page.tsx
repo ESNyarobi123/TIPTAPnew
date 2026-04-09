@@ -120,6 +120,9 @@ export default function AccessPendingPage() {
               <Button type="button" size="lg" className="shadow-soft" disabled={loading} onClick={() => void refreshAccess()}>
                 {loading ? 'Refreshing…' : 'Refresh access'}
               </Button>
+              <Button asChild type="button" variant="outline" size="lg" className="border-smoke-400/18">
+                <Link href="/onboarding/business/details">Create business workspace</Link>
+              </Button>
               <Button type="button" variant="outline" size="lg" className="border-smoke-400/18" onClick={signOut}>
                 Sign out
               </Button>
@@ -153,4 +156,3 @@ export default function AccessPendingPage() {
     </div>
   );
 }
-

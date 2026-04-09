@@ -7,5 +7,5 @@ RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @tiptap/bot-gateway run build
 WORKDIR /workspace/apps/bot-gateway
 ENV NODE_ENV=production
-EXPOSE 3001
+EXPOSE 3002
 CMD ["node", "dist/main.js"]

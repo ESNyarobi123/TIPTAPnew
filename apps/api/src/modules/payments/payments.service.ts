@@ -25,9 +25,11 @@ import type { AuthUser } from '../auth/types/request-user.type';
 import { TenantAccessService } from '../tenants/tenant-access.service';
 import { ClickPesaApiClient } from './clickpesa/clickpesa-api.client';
 import type { ClickPesaCredentials } from './clickpesa/clickpesa.types';
+import { PaymentsDispatchService } from './payments-dispatch.service';
 import type { CreateCollectionDto } from './dto/create-collection.dto';
 import type { CreatePayoutDto } from './dto/create-payout.dto';
 import type { UpsertPaymentProviderConfigDto } from './dto/upsert-payment-provider-config.dto';
+import type { PaymentRefreshReason } from './payments-queue.constants';
 
 function amountString(cents: number): string {
   return (cents / 100).toFixed(2);
@@ -89,6 +91,7 @@ export class PaymentsService {
     private readonly audit: AuditService,
     private readonly config: ConfigService,
     private readonly clickpesa: ClickPesaApiClient,
+    private readonly dispatch: PaymentsDispatchService,
   ) {}
 
   private secret() {
@@ -179,7 +182,7 @@ export class PaymentsService {
       const initiate = await this.clickpesa.initiateUssdPush(token, body);
       const merged = { preview, initiate };
       // Keep status=PENDING until query or webhook maps a terminal state (never COMPLETED from initiate alone).
-      return this.prisma.paymentTransaction.update({
+      const updated = await this.prisma.paymentTransaction.update({
         where: { id: txn.id },
         data: {
           providerConfigId: cfg.id,
@@ -188,6 +191,8 @@ export class PaymentsService {
           lastProviderStatus: deepFindStatus(merged) ?? 'INITIATED',
         },
       });
+      await this.schedulePendingStatusRefresh(updated, 'ussd-init');
+      return updated;
     } catch (e) {
       await this.prisma.paymentTransaction.update({
         where: { id: txn.id },
@@ -546,6 +551,7 @@ export class PaymentsService {
           lastProviderStatus: deepFindStatus(merged) ?? 'INITIATED',
         },
       });
+      await this.schedulePendingStatusRefresh(txn, 'payout-init');
     } catch (e) {
       txn = await this.prisma.paymentTransaction.update({
         where: { id: txn.id },
@@ -593,7 +599,9 @@ export class PaymentsService {
       throw new NotFoundException('Transaction not found');
     }
     await this.access.assertReadableTenant(actor, row.tenantId);
-    return this.refreshTransactionStatusCore(row);
+    const updated = await this.refreshTransactionStatusCore(row);
+    await this.schedulePendingStatusRefresh(updated, 'manual-followup');
+    return updated;
   }
 
   async refreshTransactionStatusFromSession(
@@ -604,7 +612,9 @@ export class PaymentsService {
     if (!row || row.sessionId !== sessionId) {
       throw new NotFoundException('Payment not found for this session');
     }
-    return this.refreshTransactionStatusCore(row);
+    const updated = await this.refreshTransactionStatusCore(row);
+    await this.schedulePendingStatusRefresh(updated, 'manual-followup');
+    return updated;
   }
 
   private async refreshTransactionStatusCore(row: PaymentTransaction): Promise<PaymentTransaction> {
@@ -720,12 +730,26 @@ export class PaymentsService {
     }
   }
 
-  async applyExternalPaymentUpdate(params: {
+  private async schedulePendingStatusRefresh(
+    txn: PaymentTransaction,
+    reason: PaymentRefreshReason,
+  ) {
+    if (txn.status !== 'PENDING') {
+      return;
+    }
+    await this.dispatch.safeScheduleRefreshStatus({
+      transactionId: txn.id,
+      tenantId: txn.tenantId,
+      reason,
+      attempt: 0,
+      maxAttempts: 3,
+      requestedAt: new Date().toISOString(),
+    });
+  }
+
+  private async resolveExternalPaymentUpdateContext(params: {
     tenantId: string;
     orderReference: string;
-    providerStatus: string | null;
-    externalRef?: string | null;
-    rawPayload?: unknown;
     headerSecret?: string | null;
   }) {
     const cfgRow = await this.prisma.paymentProviderConfig.findUnique({
@@ -746,13 +770,41 @@ export class PaymentsService {
     if (!params.orderReference?.trim()) {
       throw new BadRequestException('orderReference is required');
     }
-    const mapped = mapProviderStatusToTxn(params.providerStatus);
     const row = await this.prisma.paymentTransaction.findUnique({
       where: { orderReference: params.orderReference.trim() },
     });
     if (!row || row.tenantId !== params.tenantId) {
       throw new NotFoundException('Transaction not found for tenant');
     }
+    return { cfgRow, row };
+  }
+
+  async assertExternalPaymentUpdateAccepted(params: {
+    tenantId: string;
+    orderReference: string;
+    headerSecret?: string | null;
+  }) {
+    await this.resolveExternalPaymentUpdateContext(params);
+  }
+
+  async refreshTransactionStatusByIdInternal(id: string) {
+    const row = await this.prisma.paymentTransaction.findUnique({ where: { id } });
+    if (!row) {
+      throw new NotFoundException('Transaction not found');
+    }
+    return this.refreshTransactionStatusCore(row);
+  }
+
+  async applyExternalPaymentUpdate(params: {
+    tenantId: string;
+    orderReference: string;
+    providerStatus: string | null;
+    externalRef?: string | null;
+    rawPayload?: unknown;
+    headerSecret?: string | null;
+  }) {
+    const { cfgRow, row } = await this.resolveExternalPaymentUpdateContext(params);
+    const mapped = mapProviderStatusToTxn(params.providerStatus);
     const previousStatus = row.status;
     const updated = await this.prisma.paymentTransaction.update({
       where: { id: row.id },
@@ -777,6 +829,7 @@ export class PaymentsService {
       actorType: 'WEBHOOK',
       summary: 'Payment transaction updated from webhook/query',
     });
+    await this.schedulePendingStatusRefresh(updated, 'webhook-pending');
     return updated;
   }
 }

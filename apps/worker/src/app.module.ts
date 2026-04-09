@@ -1,22 +1,8 @@
-import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigModule } from '@nestjs/config';
+import { PaymentsJobsModule } from './jobs/payments-jobs/payments-jobs.module';
 
 @Module({
-  imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
-    BullModule.forRootAsync({
-      imports: [ConfigModule],
-      useFactory: (config: ConfigService) => ({
-        connection: {
-          host: config.get<string>('REDIS_HOST', 'localhost'),
-          port: config.get<number>('REDIS_PORT', 6379),
-          password: config.get<string>('REDIS_PASSWORD') || undefined,
-        },
-      }),
-      inject: [ConfigService],
-    }),
-    // Register processors under src/jobs/* when queues are defined.
-  ],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), PaymentsJobsModule],
 })
 export class AppModule {}

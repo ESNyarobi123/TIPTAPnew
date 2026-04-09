@@ -15,6 +15,12 @@ export type ProviderProfilePublic = {
 export type ProviderProfileInternal = ProviderProfilePublic & {
   publicSlug?: string | null;
   internalNotes?: string | null;
+  payoutProfile?: {
+    method?: string | null;
+    recipientLabel?: string | null;
+    accountMask?: string | null;
+    note?: string | null;
+  } | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -62,7 +68,17 @@ export function getMyProviderProfile(token: string) {
 
 export function upsertMyProviderProfile(
   token: string,
-  body: { displayName?: string; headline?: string | null; bio?: string | null; publicSlug?: string | null; skills?: string[] },
+  body: {
+    displayName?: string;
+    headline?: string | null;
+    bio?: string | null;
+    publicSlug?: string | null;
+    skills?: string[];
+    payoutMethod?: string | null;
+    payoutRecipientLabel?: string | null;
+    payoutAccountMask?: string | null;
+    payoutNote?: string | null;
+  },
 ) {
   return apiFetch<ProviderProfileInternal>(`/provider-registry/self`, {
     token,
@@ -82,7 +98,17 @@ export function getProviderProfileInternal(token: string, profileId: string) {
 export function updateProviderProfileInternal(
   token: string,
   profileId: string,
-  body: { internalNotes?: string | null; verifiedSummary?: string | null; headline?: string | null; bio?: string | null; skills?: string[] },
+  body: {
+    internalNotes?: string | null;
+    verifiedSummary?: string | null;
+    headline?: string | null;
+    bio?: string | null;
+    skills?: string[];
+    payoutMethod?: string | null;
+    payoutRecipientLabel?: string | null;
+    payoutAccountMask?: string | null;
+    payoutNote?: string | null;
+  },
 ) {
   return apiFetch<ProviderProfileInternal>(`/provider-registry/${encodeURIComponent(profileId)}`, {
     token,

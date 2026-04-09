@@ -1,5 +1,27 @@
 import { apiFetch } from './client';
 
+export type BotGatewayStatus = {
+  ok: boolean;
+  baseUrl: string;
+  gatewayReachable: boolean;
+  adminKeyConfigured: boolean;
+  service?: string;
+  channel?: string;
+  whatsappEnabled?: boolean;
+  bootState?: string;
+  connected?: boolean;
+  connectionState?: string;
+  canSend?: boolean;
+  lastError?: string | null;
+  note?: string;
+};
+
+export function adminGetBotGatewayStatus(token: string) {
+  return apiFetch<BotGatewayStatus>(`/admin/bot-gateway/status`, {
+    token,
+  });
+}
+
 export function adminSendBotGatewayTestMessage(
   token: string,
   body: { to: string; text: string },
@@ -20,4 +42,3 @@ export function paymentsTestProviderConfig(
     { token, method: 'POST', json: body },
   );
 }
-

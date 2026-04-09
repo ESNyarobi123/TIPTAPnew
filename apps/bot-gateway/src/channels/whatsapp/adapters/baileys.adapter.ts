@@ -44,21 +44,33 @@ function readText(msg: { message?: unknown } | null | undefined): string {
  */
 export class BaileysAdapter {
   private sock: BaileysSocket | null = null;
+  private connectionState:
+    | 'idle'
+    | 'connecting'
+    | 'ready'
+    | 'reconnecting'
+    | 'logged_out'
+    | 'disconnected' = 'idle';
 
   async connect(opts: { authDir: string; logger?: unknown; onInbound: (m: InboundMessage) => void }) {
+    this.connectionState = 'connecting';
     const { state, saveCreds } = await useMultiFileAuthState(opts.authDir);
     const { version } = await fetchLatestBaileysVersion();
 
-    const sock: BaileysSocket = makeWASocket({
+    const socketConfig: Record<string, unknown> = {
       version,
       auth: state,
       printQRInTerminal: true,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      logger: opts.logger as any,
       markOnlineOnConnect: false,
       syncFullHistory: false,
       shouldIgnoreJid: (jid: string) => jid.includes('@broadcast'),
-    }) as BaileysSocket;
+    };
+    if (opts.logger) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      socketConfig.logger = opts.logger as any;
+    }
+
+    const sock: BaileysSocket = makeWASocket(socketConfig as never) as BaileysSocket;
     this.sock = sock;
 
     sock.ev.on('creds.update', saveCreds);
@@ -69,11 +81,18 @@ export class BaileysAdapter {
         lastDisconnect?: { error?: { output?: { statusCode?: number } } };
       };
       const update = u as ConnectionUpdate;
+      if (update?.connection === 'open') {
+        this.connectionState = 'ready';
+        return;
+      }
       if (update?.connection === 'close') {
         const statusCode = update?.lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        this.connectionState = shouldReconnect ? 'reconnecting' : 'logged_out';
         if (shouldReconnect) {
           void this.connect(opts).catch(() => undefined);
+        } else {
+          this.sock = null;
         }
       }
     });
@@ -100,5 +119,12 @@ export class BaileysAdapter {
     }
     const trimmed = text.length > 4000 ? `${text.slice(0, 3990)}…` : text;
     await this.sock.sendMessage(to, { text: trimmed });
+  }
+
+  getStatus() {
+    return {
+      connected: this.connectionState === 'ready' && !!this.sock,
+      connectionState: this.connectionState,
+    };
   }
 }

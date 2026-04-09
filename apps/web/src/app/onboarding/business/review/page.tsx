@@ -11,7 +11,7 @@ import { Select } from '@/components/ui/select';
 import { WizardShell, type WizardStep } from '@/components/onboarding/wizard-shell';
 import { me } from '@/lib/api/auth';
 import { ApiError } from '@/lib/api/client';
-import { createBranchForTenant, upsertTenantCategory } from '@/lib/api/onboarding';
+import { createBranchForTenant, createSelfServeBusinessWorkspace, upsertTenantCategory } from '@/lib/api/onboarding';
 import { listTenants } from '@/lib/api/tenants-branches';
 import { getStoredToken } from '@/lib/auth/storage';
 import { clearBusinessDraft, loadBusinessDraft } from '@/lib/onboarding/storage';
@@ -34,6 +34,7 @@ export default function BusinessReviewStep() {
   const [tenants, setTenants] = useState<TenantRow[]>([]);
   const [tenantId, setTenantId] = useState<string>('');
   const [pending, setPending] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   const draft = useMemo(() => loadBusinessDraft(), []);
   const token = typeof window !== 'undefined' ? getStoredToken() : null;
@@ -58,6 +59,7 @@ export default function BusinessReviewStep() {
   }, []);
 
   const canApply = Boolean(token && tenantId && draft.category && draft.branch?.name && draft.branch?.code);
+  const canCreateWorkspace = Boolean(token && draft.business?.name && draft.category && draft.branch?.name && draft.branch?.code);
 
   async function apply() {
     const t = getStoredToken();
@@ -86,10 +88,48 @@ export default function BusinessReviewStep() {
     }
   }
 
+  async function createWorkspace() {
+    const t = getStoredToken();
+    if (!t || !draft.category || !draft.business?.name || !draft.branch?.name || !draft.branch?.code) {
+      return;
+    }
+    setCreating(true);
+    try {
+      await createSelfServeBusinessWorkspace(t, {
+        name: draft.business.name,
+        brandName: draft.business.brandName || undefined,
+        phone: draft.business.phone || undefined,
+        businessEmail: draft.business.businessEmail || undefined,
+        country: draft.business.country || undefined,
+        city: draft.business.city || undefined,
+        address: draft.business.address || undefined,
+        category: draft.category,
+        subtype: draft.subtype || undefined,
+        branch: {
+          name: draft.branch.name,
+          code: draft.branch.code,
+          address: draft.branch.address || undefined,
+          city: draft.branch.city || undefined,
+          country: draft.branch.country || undefined,
+          phone: draft.branch.phone || undefined,
+          email: draft.branch.email || undefined,
+          timezone: draft.branch.timezone || undefined,
+        },
+      });
+      toast.success('Workspace created');
+      clearBusinessDraft();
+      await replaceToWorkspaceFromToken(router, t);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : 'Could not create workspace');
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <WizardShell
       title="Business setup"
-      subtitle="Review your choices. If your account already has tenant access, TIPTAP can apply category and create your first branch now."
+      subtitle="Review your setup. Create a new workspace now, or apply the draft to an existing tenant you already own."
       steps={steps}
       currentKey="review"
     >
@@ -119,14 +159,12 @@ export default function BusinessReviewStep() {
 
         <Card className="border-smoke-400/10 bg-ivory-50/85 shadow-card">
           <CardHeader>
-            <CardTitle className="text-base">Apply to workspace</CardTitle>
+            <CardTitle className="text-base">Workspace</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             {tenants.length ? (
-              <div className="space-y-2">
-                <p className="text-sm text-smoke-200">
-                  Select the tenant you have access to. TIPTAP will enable your category and create the first branch.
-                </p>
+              <div className="space-y-3">
+                <p className="text-sm text-smoke-200">Use an existing tenant you already manage.</p>
                 <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
                   <option value="">Select tenant</option>
                   {tenants.map((t) => (
@@ -138,25 +176,50 @@ export default function BusinessReviewStep() {
                 <Button type="button" size="lg" className="w-full" disabled={!canApply || pending} onClick={() => void apply()}>
                   {pending ? 'Applying…' : 'Apply & enter workspace'}
                 </Button>
+
+                <div className="rounded-2xl border border-smoke-400/10 bg-ivory-100/75 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-smoke-200">Need another business?</p>
+                  <p className="mt-2 text-sm text-smoke-200">Create a new trial workspace and send it to admin review.</p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-3 w-full border-smoke-400/18"
+                    disabled={!canCreateWorkspace || creating}
+                    onClick={() => void createWorkspace()}
+                  >
+                    {creating ? 'Creating…' : 'Create new workspace'}
+                  </Button>
+                </div>
               </div>
             ) : (
-              <EmptyState
-                icon="ph:lock-key-duotone"
-                title="No tenant access detected"
-                description="Your account was created, but your business workspace hasn’t been assigned yet. Ask a Super Admin (or business owner) to create a tenant and assign you as TENANT_OWNER or BRANCH_MANAGER."
-                action={
-                  <Button asChild size="lg" className="shadow-card">
-                    <Link href="/access-pending">Check access status</Link>
-                  </Button>
-                }
-              />
+              <div className="space-y-4">
+                <EmptyState
+                  icon="fluent-color:building-shop-24"
+                  title="Create your first workspace"
+                  description="TIPTAP can open a trial tenant, enable your category, assign you as owner, and create your first branch right now."
+                  action={
+                    <Button
+                      type="button"
+                      size="lg"
+                      className="shadow-card"
+                      disabled={!canCreateWorkspace || creating}
+                      onClick={() => void createWorkspace()}
+                    >
+                      {creating ? 'Creating…' : 'Create workspace & continue'}
+                    </Button>
+                  }
+                />
+                <div className="rounded-2xl border border-amber-900/10 bg-amber-50/35 p-4 text-sm text-amber-950">
+                  Admin can review and approve this tenant later from the approvals desk. You can still enter setup immediately as the owner.
+                </div>
+              </div>
             )}
 
             <div className="rounded-2xl border border-smoke-400/10 bg-smoke-400 p-4 text-ivory-100">
               <div className="flex items-start gap-3">
                 <Icon icon="ph:info-duotone" className="mt-0.5 h-5 w-5 text-ivory-200" aria-hidden />
                 <p className="text-sm leading-relaxed text-ivory-200/95">
-                  TIPTAP backend currently restricts tenant creation to Super Admin. This wizard configures an existing tenant you already have access to.
+                  New workspaces open as <span className="font-semibold text-ivory-100">TRIAL</span> with your category and first branch already attached.
                 </p>
               </div>
             </div>
@@ -172,4 +235,3 @@ export default function BusinessReviewStep() {
     </WizardShell>
   );
 }
-

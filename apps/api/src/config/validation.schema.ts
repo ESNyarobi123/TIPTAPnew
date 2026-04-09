@@ -32,6 +32,8 @@ export const validationSchema = Joi.object({
   /** Admin analytics: platform commission rate (0..1) used for dashboard estimates. */
   ADMIN_COMMISSION_RATE: Joi.number().min(0).max(1).default(0.05),
   CLICKPESA_API_BASE_URL: Joi.string().optional().allow(''),
+  /** Shared key for worker/internal job callbacks into the API. */
+  INTERNAL_SERVICES_KEY: Joi.string().optional().allow('').default('tiptap_internal_dev_key'),
   /** Bot gateway base URL for admin tools (server-to-server). */
   BOT_GATEWAY_BASE_URL: Joi.string().optional().allow('').default('http://localhost:3002'),
   /** Shared key required by bot-gateway admin endpoints (never expose to browser). */

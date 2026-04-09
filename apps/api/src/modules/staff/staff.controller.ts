@@ -20,14 +20,17 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import type { AuthUser } from '../auth/types/request-user.type';
 import { CreateStaffAssignmentDto } from './dto/create-staff-assignment.dto';
+import { CreatePayrollRunDto } from './dto/create-payroll-run.dto';
 import { CreateStaffCompensationDto } from './dto/create-staff-compensation.dto';
 import { CreateStaffDto } from './dto/create-staff.dto';
 import { CreateStaffJoinInviteDto } from './dto/create-staff-join-invite.dto';
 import { BulkCreateStaffDto } from './dto/bulk-create-staff.dto';
 import { LinkProviderProfileDto } from './dto/link-provider-profile.dto';
+import { RecordPayrollDisbursementDto } from './dto/record-payroll-disbursement.dto';
 import { RedeemStaffJoinInviteDto } from './dto/redeem-staff-join-invite.dto';
 import { SearchStaffQueryDto } from './dto/search-staff-query.dto';
 import { UpdateStaffAssignmentDto } from './dto/update-staff-assignment.dto';
+import { UpdatePayrollRunStatusDto } from './dto/update-payroll-run-status.dto';
 import { UpdateStaffCompensationDto } from './dto/update-staff-compensation.dto';
 import { UpdateStaffDto } from './dto/update-staff.dto';
 import { StaffService, type StaffRequestMeta } from './staff.service';
@@ -93,6 +96,17 @@ export class StaffController {
     return this.staff.findAll(user, tenantId);
   }
 
+  @Get('compensation-feed')
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'List staff compensation rows for a tenant / branch scope' })
+  listCompensationFeed(
+    @CurrentUser() user: AuthUser,
+    @Query('tenantId') tenantId: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.staff.listCompensationFeed(user, tenantId, branchId);
+  }
+
   @Get('search')
   @Roles(
     RoleCode.SUPER_ADMIN,
@@ -117,6 +131,18 @@ export class StaffController {
   @ApiOperation({ summary: 'List compensation rows for my staff profile(s)' })
   myCompensations(@CurrentUser() user: AuthUser) {
     return this.staff.listMyCompensations(user);
+  }
+
+  @Get('me/payslips')
+  @ApiOperation({ summary: 'List payslips for my staff profile(s)' })
+  myPayslips(@CurrentUser() user: AuthUser) {
+    return this.staff.listMyPayslips(user);
+  }
+
+  @Get('me/payslips/:slipId')
+  @ApiOperation({ summary: 'Get a specific payslip for my staff profile(s)' })
+  myPayslip(@CurrentUser() user: AuthUser, @Param('slipId') slipId: string) {
+    return this.staff.getMyPayslip(user, slipId);
   }
 
   @Post('join-invites/redeem')
@@ -149,6 +175,68 @@ export class StaffController {
     return this.staff.listJoinInvites(user, tenantId);
   }
 
+  @Get('payroll-runs')
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'List payroll runs for a tenant / branch scope' })
+  listPayrollRuns(
+    @CurrentUser() user: AuthUser,
+    @Query('tenantId') tenantId: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.staff.listPayrollRuns(user, tenantId, branchId);
+  }
+
+  @Post('payroll-runs')
+  @HttpCode(HttpStatus.CREATED)
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'Create a payroll run from eligible compensation rows' })
+  createPayrollRun(
+    @Body() body: CreatePayrollRunDto,
+    @CurrentUser() user: AuthUser,
+    @Req() req: Request,
+  ) {
+    return this.staff.createPayrollRun(user, body, staffMeta(req));
+  }
+
+  @Get('payroll-runs/:runId')
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'Get payroll run details and generated slips' })
+  getPayrollRun(@Param('runId') runId: string, @CurrentUser() user: AuthUser) {
+    return this.staff.getPayrollRun(user, runId);
+  }
+
+  @Patch('payroll-runs/:runId/status')
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'Update payroll run status' })
+  updatePayrollRunStatus(
+    @Param('runId') runId: string,
+    @Body() body: UpdatePayrollRunStatusDto,
+    @CurrentUser() user: AuthUser,
+    @Req() req: Request,
+  ) {
+    return this.staff.updatePayrollRunStatus(user, runId, body, staffMeta(req));
+  }
+
+  @Get('payroll-slips/:slipId')
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'Get a payroll slip with lines and disbursements' })
+  getPayrollSlip(@Param('slipId') slipId: string, @CurrentUser() user: AuthUser) {
+    return this.staff.getPayrollSlip(user, slipId);
+  }
+
+  @Post('payroll-slips/:slipId/disbursements')
+  @HttpCode(HttpStatus.CREATED)
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'Record payroll disbursement / payment proof for a payslip' })
+  recordPayrollDisbursement(
+    @Param('slipId') slipId: string,
+    @Body() body: RecordPayrollDisbursementDto,
+    @CurrentUser() user: AuthUser,
+    @Req() req: Request,
+  ) {
+    return this.staff.recordPayrollDisbursement(user, slipId, body, staffMeta(req));
+  }
+
   @Patch('join-invites/:id/revoke')
   @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
   @ApiOperation({ summary: 'Revoke a join code' })
@@ -179,6 +267,13 @@ export class StaffController {
   @ApiOperation({ summary: 'List staff compensation rows' })
   listCompensations(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.staff.listCompensations(user, id);
+  }
+
+  @Get(':id/payslips')
+  @Roles(RoleCode.SUPER_ADMIN, RoleCode.TENANT_OWNER, RoleCode.BRANCH_MANAGER)
+  @ApiOperation({ summary: 'List staff payslips' })
+  listPayslips(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.staff.listStaffPayslips(user, id);
   }
 
   @Post(':id/assignments')
